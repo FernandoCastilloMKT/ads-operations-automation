@@ -1,0 +1,183 @@
+name: Actualizar consumos Google Ads Heartbeat
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Heartbeat permanente. Si GitHub entrega tarde, ejecuta lo pendiente.
+    - cron: "10,40 * * * *"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ads-sheets-automation
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TZ: Europe/Madrid
+
+    steps:
+      - name: Preparar contexto
+        id: context
+        shell: bash
+        run: |
+          madrid_date="$(TZ=Europe/Madrid date +%F)"
+          madrid_time="$(TZ=Europe/Madrid date +%H:%M)"
+          madrid_hour="$(TZ=Europe/Madrid date +%H)"
+          madrid_minute="$(TZ=Europe/Madrid date +%M)"
+          madrid_minutes=$((10#$madrid_hour * 60 + 10#$madrid_minute))
+
+          echo "madrid_date=${madrid_date}" >> "$GITHUB_OUTPUT"
+          echo "madrid_time=${madrid_time}" >> "$GITHUB_OUTPUT"
+          echo "madrid_minutes=${madrid_minutes}" >> "$GITHUB_OUTPUT"
+          echo "complete_marker=ads-completo-${madrid_date}" >> "$GITHUB_OUTPUT"
+          echo "rapid_marker=ads-rapido-${madrid_date}" >> "$GITHUB_OUTPUT"
+          echo "Heartbeat recibido a hora Madrid ${madrid_time}; evento ${{ github.event_name }}."
+
+      - name: Comprobar marcador completo
+        id: complete_marker
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .run-markers/${{ steps.context.outputs.complete_marker }}
+          key: ${{ steps.context.outputs.complete_marker }}
+          lookup-only: true
+
+      - name: Comprobar marcador rapido
+        id: rapid_marker
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .run-markers/${{ steps.context.outputs.rapid_marker }}
+          key: ${{ steps.context.outputs.rapid_marker }}
+          lookup-only: true
+
+      - name: Decidir si toca ejecutar
+        id: should_run
+        shell: bash
+        run: |
+          complete_start=$((7 * 60 + 40))
+          rapid_start=$((15 * 60 + 10))
+
+          madrid_minutes="${{ steps.context.outputs.madrid_minutes }}"
+          madrid_time="${{ steps.context.outputs.madrid_time }}"
+          complete_done="${{ steps.complete_marker.outputs.cache-hit }}"
+          rapid_done="${{ steps.rapid_marker.outputs.cache-hit }}"
+
+          if [ "$madrid_minutes" -ge "$complete_start" ] && [ "$complete_done" != "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "modo=completo" >> "$GITHUB_OUTPUT"
+            echo "marker_key=${{ steps.context.outputs.complete_marker }}" >> "$GITHUB_OUTPUT"
+            echo "Pendiente completo diario; hora Madrid ${madrid_time}; marcador completo no existe."
+          elif [ "$madrid_minutes" -ge "$rapid_start" ] && [ "$rapid_done" != "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "modo=rapido" >> "$GITHUB_OUTPUT"
+            echo "marker_key=${{ steps.context.outputs.rapid_marker }}" >> "$GITHUB_OUTPUT"
+            echo "Pendiente rapido diario; hora Madrid ${madrid_time}; marcador rapido no existe."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "modo=skip" >> "$GITHUB_OUTPUT"
+            echo "marker_key=skip-${{ steps.context.outputs.madrid_date }}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "Sin ejecucion pendiente; hora Madrid ${madrid_time}; completo=${complete_done}; rapido=${rapid_done}."
+          fi
+
+      - name: Sin ejecucion pendiente
+        if: steps.should_run.outputs.run != 'true'
+        run: echo "No hay ejecucion pendiente en este heartbeat."
+
+      - name: Descargar repositorio
+        if: steps.should_run.outputs.run == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Preparar Python
+        id: setup-python
+        if: steps.should_run.outputs.run == 'true'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Restaurar entorno Python
+        id: cache-venv
+        if: steps.should_run.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .venv
+          key: consumos-venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Crear entorno e instalar librerias
+        if: steps.should_run.outputs.run == 'true'
+        run: |
+          if [ "${{ steps.cache-venv.outputs.cache-hit }}" != "true" ]; then
+            python -m venv .venv
+            .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+          fi
+          .venv/bin/python -c "import google.ads.googleads, google.auth, gspread, dotenv, tzdata"
+
+      - name: Preparar configuracion privada
+        if: steps.should_run.outputs.run == 'true'
+        env:
+          CONSUMPTION_CONFIG_GZIP_B64: ${{ secrets.CONSUMPTION_CONFIG_GZIP_B64 }}
+        run: .venv/bin/python scripts/materialize_runtime_config.py consumption
+
+      - name: Validar secrets y preparar credenciales
+        if: steps.should_run.outputs.run == 'true'
+        shell: bash
+        env:
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON }}
+        run: |
+          missing=0
+          for name in \
+            GOOGLE_ADS_DEVELOPER_TOKEN \
+            GOOGLE_ADS_CLIENT_ID \
+            GOOGLE_ADS_CLIENT_SECRET \
+            GOOGLE_ADS_REFRESH_TOKEN \
+            GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error title=Falta secret::${name}"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          mkdir -p credentials
+          printf "%s" "$GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON" > credentials/google-sheets-service-account.json
+          .venv/bin/python -m json.tool credentials/google-sheets-service-account.json > /dev/null
+
+      - name: Actualizar Google Sheets
+        if: steps.should_run.outputs.run == 'true'
+        env:
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+        run: |
+          .venv/bin/python scripts/public_entrypoint.py --label consumos-heartbeat -- \
+            .venv/bin/python scripts/actualizar_consumos.py \
+            --modo "${{ steps.should_run.outputs.modo }}" \
+            --quick-lookback-days 7 --parallel-workers 10
+
+      - name: Preparar marcador de ejecucion programada
+        if: success() && steps.should_run.outputs.run == 'true'
+        run: |
+          mkdir -p ".run-markers/${{ steps.should_run.outputs.marker_key }}"
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > ".run-markers/${{ steps.should_run.outputs.marker_key }}/completed_at.txt"
+          echo "${{ steps.should_run.outputs.modo }}" > ".run-markers/${{ steps.should_run.outputs.marker_key }}/modo.txt"
+
+      - name: Guardar marcador de ejecucion programada
+        if: success() && steps.should_run.outputs.run == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .run-markers/${{ steps.should_run.outputs.marker_key }}
+          key: ${{ steps.should_run.outputs.marker_key }}

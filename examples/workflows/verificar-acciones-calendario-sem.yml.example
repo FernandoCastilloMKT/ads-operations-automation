@@ -1,0 +1,119 @@
+name: Verificar acciones SEM de Calendar
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Construir alertas sin enviar correos"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ads-sheets-automation
+  cancel-in-progress: false
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Europe/Madrid
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Preparar Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar librerias
+        run: pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Preparar configuraciones privadas
+        env:
+          CONSUMPTION_CONFIG_GZIP_B64: ${{ secrets.CONSUMPTION_CONFIG_GZIP_B64 }}
+          SEM_CONFIG_GZIP_B64: ${{ secrets.SEM_CONFIG_GZIP_B64 }}
+        run: python scripts/materialize_runtime_config.py consumption sem
+
+      - name: Validar secrets y preparar credenciales
+        shell: bash
+        env:
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_WORKSPACE_TOKEN_JSON: ${{ secrets.GOOGLE_WORKSPACE_TOKEN_JSON }}
+        run: |
+          missing=0
+          for name in \
+            GOOGLE_ADS_DEVELOPER_TOKEN \
+            GOOGLE_ADS_CLIENT_ID \
+            GOOGLE_ADS_CLIENT_SECRET \
+            GOOGLE_ADS_REFRESH_TOKEN \
+            GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON \
+            GOOGLE_WORKSPACE_TOKEN_JSON
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error title=Falta secret::${name}"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          mkdir -p credentials
+          printf "%s" "$GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON" > credentials/google-sheets-service-account.json
+          python -m json.tool credentials/google-sheets-service-account.json > /dev/null
+          printf "%s" "$GOOGLE_WORKSPACE_TOKEN_JSON" | python -m json.tool > /dev/null
+
+      - name: Restaurar estado anti-spam
+        id: restore-state
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: logs/verificar_acciones_calendario_sem_state.json
+          key: calendar-sem-state-${{ github.run_id }}
+          restore-keys: |
+            calendar-sem-state-
+
+      - name: Preparar estado inicial
+        shell: bash
+        run: |
+          mkdir -p logs
+          if [ ! -f logs/verificar_acciones_calendario_sem_state.json ]; then
+            printf '%s\n' '{"version":1,"sent":{}}' > logs/verificar_acciones_calendario_sem_state.json
+          fi
+
+      - name: Verificar acciones de Calendar
+        shell: bash
+        env:
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_WORKSPACE_TOKEN_JSON: ${{ secrets.GOOGLE_WORKSPACE_TOKEN_JSON }}
+          GOOGLE_CALENDAR_IDS: ${{ vars.GOOGLE_CALENDAR_IDS }}
+        run: |
+          args=()
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python scripts/public_entrypoint.py --label calendario-sem -- \
+            python scripts/verificar_acciones_calendario_sem.py "${args[@]}"
+
+      - name: Guardar estado anti-spam
+        if: success() && inputs.dry_run != true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: logs/verificar_acciones_calendario_sem_state.json
+          key: calendar-sem-state-${{ github.run_id }}

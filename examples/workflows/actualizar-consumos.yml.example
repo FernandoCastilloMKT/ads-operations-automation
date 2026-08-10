@@ -1,0 +1,324 @@
+name: Actualizar consumos Google Ads
+run-name: >-
+  Consumos | ${{ inputs.cliente || 'TODOS' }} |
+  ${{ inputs.modo || 'completo' }} |
+  ${{ inputs.request_id || github.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "Tipo de ejecucion"
+        required: false
+        default: "completo"
+        type: choice
+        options:
+          - completo
+          - rapido
+      origen:
+        description: "Uso interno; dejar manual al lanzar desde GitHub"
+        required: false
+        default: "manual"
+        type: choice
+        options:
+          - manual
+          - apps-script
+      cliente:
+        description: "Cliente concreto; vacio procesa todos los activos"
+        required: false
+        default: ""
+        type: string
+      request_id:
+        description: "Identificador interno para avisos de finalizacion"
+        required: false
+        default: ""
+        type: string
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ads-sheets-automation
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TZ: Europe/Madrid
+
+    steps:
+      - name: Preparar contexto
+        id: context
+        shell: bash
+        env:
+          REQUESTED_MODE: ${{ inputs.modo }}
+          REQUEST_ORIGIN: ${{ inputs.origen }}
+          REQUESTED_CLIENT: ${{ inputs.cliente }}
+        run: |
+          madrid_date="$(TZ=Europe/Madrid date +%F)"
+          madrid_time="$(TZ=Europe/Madrid date +%H:%M)"
+          requested_mode="${REQUESTED_MODE:-completo}"
+          request_origin="${REQUEST_ORIGIN:-manual}"
+          requested_client="${REQUESTED_CLIENT:-}"
+
+          case "$requested_mode" in
+            completo|rapido) ;;
+            *)
+              echo "::error title=Modo no valido::${requested_mode}"
+              exit 1
+              ;;
+          esac
+
+          case "$request_origin" in
+            manual|apps-script) ;;
+            *)
+              echo "::error title=Origen no valido::${request_origin}"
+              exit 1
+              ;;
+          esac
+
+          if printf "%s" "$requested_client" | grep -q '[[:cntrl:]]'; then
+            echo "::error title=Cliente no valido::Contiene caracteres de control."
+            exit 1
+          fi
+
+          if [ "${#requested_client}" -gt 100 ]; then
+            echo "::error title=Cliente no valido::Supera los 100 caracteres."
+            exit 1
+          fi
+
+          echo "madrid_date=${madrid_date}" >> "$GITHUB_OUTPUT"
+          echo "madrid_time=${madrid_time}" >> "$GITHUB_OUTPUT"
+          echo "complete_marker=ads-completo-${madrid_date}" >> "$GITHUB_OUTPUT"
+          echo "rapid_marker=ads-rapido-${madrid_date}" >> "$GITHUB_OUTPUT"
+          echo "requested_mode=${requested_mode}" >> "$GITHUB_OUTPUT"
+          echo "request_origin=${request_origin}" >> "$GITHUB_OUTPUT"
+          echo "requested_client=${requested_client}" >> "$GITHUB_OUTPUT"
+
+          if [ "$request_origin" = "manual" ]; then
+            echo "is_manual=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_manual=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Contexto: origen ${request_origin}; modo ${requested_mode}; hora Madrid ${madrid_time}."
+
+      - name: Comprobar marcador completo
+        id: complete_marker
+        if: steps.context.outputs.is_manual != 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .run-markers/${{ steps.context.outputs.complete_marker }}
+          key: ${{ steps.context.outputs.complete_marker }}
+          lookup-only: true
+
+      - name: Comprobar marcador rapido
+        id: rapid_marker
+        if: steps.context.outputs.is_manual != 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .run-markers/${{ steps.context.outputs.rapid_marker }}
+          key: ${{ steps.context.outputs.rapid_marker }}
+          lookup-only: true
+
+      - name: Decidir si toca ejecutar
+        id: should_run
+        shell: bash
+        env:
+          REQUESTED_MODE: ${{ steps.context.outputs.requested_mode }}
+          REQUEST_ORIGIN: ${{ steps.context.outputs.request_origin }}
+          COMPLETE_DONE: ${{ steps.complete_marker.outputs.cache-hit }}
+          RAPID_DONE: ${{ steps.rapid_marker.outputs.cache-hit }}
+          COMPLETE_MARKER: ${{ steps.context.outputs.complete_marker }}
+          RAPID_MARKER: ${{ steps.context.outputs.rapid_marker }}
+          MADRID_TIME: ${{ steps.context.outputs.madrid_time }}
+        run: |
+          mode="$REQUESTED_MODE"
+          origin="$REQUEST_ORIGIN"
+
+          if [ "$origin" = "manual" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "modo=${mode}" >> "$GITHUB_OUTPUT"
+            echo "is_manual=true" >> "$GITHUB_OUTPUT"
+            echo "marker_key=manual-${mode}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "Ejecucion manual: se ejecuta en modo ${mode}."
+            exit 0
+          fi
+
+          if [ "$mode" = "completo" ]; then
+            marker_done="$COMPLETE_DONE"
+            marker_key="$COMPLETE_MARKER"
+          else
+            marker_done="$RAPID_DONE"
+            marker_key="$RAPID_MARKER"
+          fi
+
+          echo "is_manual=false" >> "$GITHUB_OUTPUT"
+          echo "marker_key=${marker_key}" >> "$GITHUB_OUTPUT"
+          if [ "$marker_done" = "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "modo=skip" >> "$GITHUB_OUTPUT"
+            echo "Slot ${mode} ya completado; no se repite. Hora Madrid ${MADRID_TIME}."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "modo=${mode}" >> "$GITHUB_OUTPUT"
+            echo "Slot ${mode} pendiente; se ejecuta y se guardara ${marker_key}."
+          fi
+
+      - name: Sin ejecucion pendiente
+        if: steps.should_run.outputs.run != 'true'
+        run: echo "La ejecucion programada ya estaba completada."
+
+      - name: Descargar repositorio
+        if: steps.should_run.outputs.run == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Preparar Python
+        id: setup-python
+        if: steps.should_run.outputs.run == 'true'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Restaurar entorno Python
+        id: cache-venv
+        if: steps.should_run.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .venv
+          key: consumos-venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Crear entorno e instalar librerias
+        if: steps.should_run.outputs.run == 'true'
+        run: |
+          if [ "${{ steps.cache-venv.outputs.cache-hit }}" != "true" ]; then
+            python -m venv .venv
+            .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+          fi
+          .venv/bin/python -c "import google.ads.googleads, google.auth, gspread, dotenv, tzdata"
+
+      - name: Preparar configuracion privada
+        if: steps.should_run.outputs.run == 'true'
+        env:
+          CONSUMPTION_CONFIG_GZIP_B64: ${{ secrets.CONSUMPTION_CONFIG_GZIP_B64 }}
+        run: .venv/bin/python scripts/materialize_runtime_config.py consumption
+
+      - name: Validar secrets y preparar credenciales
+        if: steps.should_run.outputs.run == 'true'
+        shell: bash
+        env:
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON }}
+        run: |
+          missing=0
+          for name in \
+            GOOGLE_ADS_DEVELOPER_TOKEN \
+            GOOGLE_ADS_CLIENT_ID \
+            GOOGLE_ADS_CLIENT_SECRET \
+            GOOGLE_ADS_REFRESH_TOKEN \
+            GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error title=Falta secret::${name}"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          mkdir -p credentials
+          printf "%s" "$GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON" > credentials/google-sheets-service-account.json
+          .venv/bin/python -m json.tool credentials/google-sheets-service-account.json > /dev/null
+
+      - name: Actualizar Google Sheets
+        if: steps.should_run.outputs.run == 'true'
+        env:
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          RUN_MODE: ${{ steps.should_run.outputs.modo }}
+          CLIENT_FILTER: ${{ steps.context.outputs.requested_client }}
+        run: |
+          command=(
+            .venv/bin/python scripts/actualizar_consumos.py
+            --modo "$RUN_MODE"
+            --quick-lookback-days 7
+            --parallel-workers 10
+          )
+          if [ -n "$CLIENT_FILTER" ]; then
+            command+=(--cliente "$CLIENT_FILTER")
+          fi
+          .venv/bin/python scripts/public_entrypoint.py --label consumos -- "${command[@]}"
+
+      - name: Preparar marcador de ejecucion programada
+        if: success() && steps.should_run.outputs.run == 'true' && steps.should_run.outputs.is_manual != 'true'
+        run: |
+          mkdir -p ".run-markers/${{ steps.should_run.outputs.marker_key }}"
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > ".run-markers/${{ steps.should_run.outputs.marker_key }}/completed_at.txt"
+          echo "${{ steps.should_run.outputs.modo }}" > ".run-markers/${{ steps.should_run.outputs.marker_key }}/modo.txt"
+
+      - name: Guardar marcador de ejecucion programada
+        if: success() && steps.should_run.outputs.run == 'true' && steps.should_run.outputs.is_manual != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .run-markers/${{ steps.should_run.outputs.marker_key }}
+          key: ${{ steps.should_run.outputs.marker_key }}
+
+      - name: Confirmar finalizacion en Google Sheets
+        if: ${{ always() && inputs.request_id != '' }}
+        continue-on-error: true
+        env:
+          CALLBACK_URL: ${{ secrets.CONSUMOS_APPS_SCRIPT_CALLBACK_URL }}
+          CALLBACK_TOKEN: ${{ secrets.CONSUMOS_APPS_SCRIPT_CALLBACK_TOKEN }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          RUN_CONCLUSION: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_TOKEN" ]; then
+            echo "::warning title=Callback no configurado::Se usara el comprobador de respaldo de Apps Script."
+            exit 0
+          fi
+
+          payload="$(python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          print(json.dumps({
+              "token": os.environ["CALLBACK_TOKEN"],
+              "request_id": os.environ["REQUEST_ID"],
+              "conclusion": os.environ["RUN_CONCLUSION"],
+              "run_url": os.environ["RUN_URL"],
+              "finished_at": datetime.now(timezone.utc).isoformat(),
+          }, separators=(",", ":")))
+          PY
+          )"
+
+          http_code="$(curl --silent --show-error \
+            --max-time 20 \
+            --header "Content-Type: application/json" \
+            --data "$payload" \
+            --output /dev/null \
+            --write-out "%{http_code}" \
+            "$CALLBACK_URL")" || {
+              echo "::warning title=Callback sin confirmacion::Se usara el comprobador de respaldo de Apps Script."
+              exit 1
+            }
+
+          case "$http_code" in
+            200|302|303)
+              echo "Callback Apps Script enviado (HTTP $http_code)."
+              ;;
+            *)
+              echo "::warning title=Callback rechazado::HTTP $http_code. Se usara el comprobador de respaldo."
+              exit 1
+              ;;
+          esac

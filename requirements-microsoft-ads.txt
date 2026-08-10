@@ -1,0 +1,6 @@
+msads==13.0.28.2
+python-dateutil==2.9.0.post0
+google-auth-oauthlib==1.4.0
+python-dotenv==1.2.2
+requests==2.34.2
+truststore==0.10.4

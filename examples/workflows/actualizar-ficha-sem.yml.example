@@ -1,0 +1,197 @@
+name: Actualizar ficha SEM
+run-name: Fichas SEM | ${{ inputs.request_id || github.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      cliente:
+        description: "Clave opaca client_NNN o TODAS"
+        required: true
+        default: "client_001"
+        type: string
+      request_id:
+        description: "Identificador opaco para confirmar la finalizacion"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ads-sheets-automation
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TZ: Europe/Madrid
+      PYTHONPATH: scripts
+
+    steps:
+      # Este job solo necesita los archivos del commit, no el historial Git. El
+      # archivo tar evita esperas esporadicas de git-fetch en los runners.
+      - name: Descargar repositorio
+        shell: bash
+        env:
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="$(mktemp)"
+          trap 'rm -f "$archive"' EXIT
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --max-time 30 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GH_REPOSITORY/tarball/$GH_SHA" \
+            --output "$archive"
+          tar --extract --gzip --file "$archive" --strip-components=1
+
+      - name: Preparar Python
+        id: setup-python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Restaurar entorno Python
+        id: cache-venv
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .venv
+          key: sem-venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Crear entorno e instalar librerias
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Validar entorno Python
+        run: |
+          PYTHONPATH=scripts .venv/bin/python -c "import bingads, google.ads.googleads, google.auth, gspread, dotenv, tzdata; import microsoft_ads.provider"
+
+      - name: Preparar configuraciones privadas
+        env:
+          CONSUMPTION_CONFIG_GZIP_B64: ${{ secrets.CONSUMPTION_CONFIG_GZIP_B64 }}
+          SEM_CONFIG_GZIP_B64: ${{ secrets.SEM_CONFIG_GZIP_B64 }}
+        run: python scripts/materialize_runtime_config.py consumption sem
+
+      - name: Validar cliente solicitado
+        env:
+          CLIENTE_INPUT: ${{ inputs.cliente }}
+        run: |
+          .venv/bin/python scripts/public_entrypoint.py --label validar-ficha -- \
+            .venv/bin/python -c "import os; from actualizar_fichas_sem import resolve_sem_client_selection; resolve_sem_client_selection(os.environ['CLIENTE_INPUT'])"
+
+      - name: Validar secrets y preparar credenciales
+        shell: bash
+        env:
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON }}
+          MICROSOFT_ADS_DEVELOPER_TOKEN: ${{ secrets.MICROSOFT_ADS_DEVELOPER_TOKEN }}
+          MICROSOFT_ADS_GOOGLE_CLIENT_ID: ${{ secrets.MICROSOFT_ADS_GOOGLE_CLIENT_ID }}
+          MICROSOFT_ADS_GOOGLE_CLIENT_SECRET: ${{ secrets.MICROSOFT_ADS_GOOGLE_CLIENT_SECRET }}
+          MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN: ${{ secrets.MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN }}
+        run: |
+          missing=0
+          for name in \
+            GOOGLE_ADS_DEVELOPER_TOKEN \
+            GOOGLE_ADS_CLIENT_ID \
+            GOOGLE_ADS_CLIENT_SECRET \
+            GOOGLE_ADS_REFRESH_TOKEN \
+            GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON \
+            MICROSOFT_ADS_DEVELOPER_TOKEN \
+            MICROSOFT_ADS_GOOGLE_CLIENT_ID \
+            MICROSOFT_ADS_GOOGLE_CLIENT_SECRET \
+            MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error title=Falta secret::${name}"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          mkdir -p credentials
+          printf "%s" "$GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON" > credentials/google-sheets-service-account.json
+          .venv/bin/python -m json.tool credentials/google-sheets-service-account.json > /dev/null
+
+      - name: Actualizar ficha SEM
+        env:
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          MICROSOFT_ADS_DEVELOPER_TOKEN: ${{ secrets.MICROSOFT_ADS_DEVELOPER_TOKEN }}
+          MICROSOFT_ADS_GOOGLE_CLIENT_ID: ${{ secrets.MICROSOFT_ADS_GOOGLE_CLIENT_ID }}
+          MICROSOFT_ADS_GOOGLE_CLIENT_SECRET: ${{ secrets.MICROSOFT_ADS_GOOGLE_CLIENT_SECRET }}
+          MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN: ${{ secrets.MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN }}
+          CLIENTE_INPUT: ${{ inputs.cliente }}
+        run: |
+          .venv/bin/python scripts/public_entrypoint.py --label fichas-sem -- \
+            .venv/bin/python scripts/actualizar_fichas_sem.py --cliente "$CLIENTE_INPUT"
+
+      - name: Confirmar finalizacion en Google Sheets
+        if: ${{ always() && inputs.request_id != '' }}
+        continue-on-error: true
+        env:
+          CALLBACK_URL: ${{ secrets.FICHAS_APPS_SCRIPT_CALLBACK_URL }}
+          CALLBACK_TOKEN: ${{ secrets.FICHAS_APPS_SCRIPT_CALLBACK_TOKEN }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          RUN_CONCLUSION: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_TOKEN" ]; then
+            echo "::warning title=Callback no configurado::Se usara el comprobador de respaldo de Apps Script."
+            exit 0
+          fi
+
+          payload="$(python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          print(json.dumps({
+              "token": os.environ["CALLBACK_TOKEN"],
+              "request_id": os.environ["REQUEST_ID"],
+              "conclusion": os.environ["RUN_CONCLUSION"],
+              "run_url": os.environ["RUN_URL"],
+              "finished_at": datetime.now(timezone.utc).isoformat(),
+          }, separators=(",", ":")))
+          PY
+          )"
+
+          # Apps Script ejecuta doPost antes de responder con la redireccion a
+          # googleusercontent. No es necesario seguirla: hacerlo podia provocar
+          # reintentos de hasta un minuto aunque la hoja ya estuviera avisada.
+          http_code="$(curl --silent --show-error \
+            --max-time 20 \
+            --header "Content-Type: application/json" \
+            --data "$payload" \
+            --output /dev/null \
+            --write-out "%{http_code}" \
+            "$CALLBACK_URL")" || {
+              echo "::warning title=Callback sin confirmacion::Se usara el comprobador de respaldo de Apps Script."
+              exit 1
+            }
+
+          case "$http_code" in
+            200|302|303)
+              echo "Callback Apps Script enviado (HTTP $http_code)."
+              ;;
+            *)
+              echo "::warning title=Callback rechazado::HTTP $http_code. Se usara el comprobador de respaldo."
+              exit 1
+              ;;
+          esac
