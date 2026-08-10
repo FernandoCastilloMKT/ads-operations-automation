@@ -1,0 +1,37 @@
+# Secrets and private runtime configuration
+.env
+.env.*
+!.env.example
+credentials/
+config_clientes.json
+config_fichas_sem.json
+**/.clasp.json
+**/.clasprc.json
+token.json
+*.key
+*.p12
+*.pfx
+
+# Local environments and generated state
+.venv/
+.venv-microsoft-ads/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.run-markers/
+logs/
+.public-build/
+
+# Editors, operating systems and temporary files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*.bak
+*.swp
+~*

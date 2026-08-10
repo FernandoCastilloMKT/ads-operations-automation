@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "control_sem_spreadsheet_id": "EXAMPLE_CONTROL_SPREADSHEET_ID",
+  "control_sem_worksheet_name": "Vista Global",
+  "calendar_email_recipient": "alerts@example.invalid",
+  "saldo_email_recipients": [
+    "alerts@example.invalid"
+  ],
+  "calendar_client_exceptions_after_stop": [],
+  "legacy_renewal_note_prefixes": [],
+  "legacy_button_handlers": [],
+  "clients": {
+    "cliente-demo": {
+      "nombre": "Cliente Demo",
+      "worksheet_name": "Cliente Demo",
+      "google_ads_customer_id": "0000000000",
+      "mcc_id": "0000000000",
+      "account_status_cell": "A2",
+      "public_key": "client_001"
+    }
+  },
+  "sem_only_mcc_configs": {},
+  "excluded_sem_clients": []
+}

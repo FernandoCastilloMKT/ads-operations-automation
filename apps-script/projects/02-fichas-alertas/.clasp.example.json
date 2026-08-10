@@ -1,0 +1,21 @@
+{
+  "scriptId": "REPLACE_WITH_YOUR_APPS_SCRIPT_ID",
+  "projectId": "REPLACE_WITH_YOUR_GCP_PROJECT_ID",
+  "rootDir": "",
+  "scriptExtensions": [
+    ".js"
+  ],
+  "htmlExtensions": [
+    ".html"
+  ],
+  "jsonExtensions": [
+    ".json"
+  ],
+  "filePushOrder": [
+    "00_CONFIG.js",
+    "01_FICHAS.js",
+    "02_ALERTAS_SALDO.js",
+    "03_GITHUB_CALLBACK.js"
+  ],
+  "skipSubdirectories": false
+}
