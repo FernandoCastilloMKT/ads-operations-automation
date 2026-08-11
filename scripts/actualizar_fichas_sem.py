@@ -79,7 +79,10 @@ MONTHLY_RENEWAL_TEXT = "Renueva mes a mes sin fecha fin"
 MONTHLY_RENEWAL_NOTE_PREFIX = (
     "SEM - ultima renovacion mensual: "
 )
-TOTAL_CURRENCY_FORMAT = "[$\u20ac]#,##0.00"
+OPTIONAL_DECIMAL_FORMAT = "#,##0.##"
+OPTIONAL_PERCENT_FORMAT = "0.##%"
+OPTIONAL_CURRENCY_FORMAT = "[$\u20ac]#,##0.##"
+TOTAL_CURRENCY_FORMAT = OPTIONAL_CURRENCY_FORMAT
 GOOGLE_SHEETS_DATE_EPOCH = date(1899, 12, 30)
 
 
@@ -330,6 +333,14 @@ def parse_args():
         help=(
             "Fecha YYYY-MM-DD para reparaciones controladas. Si se omite, "
             "se usa la fecha actual de Europe/Madrid."
+        ),
+    )
+    parser.add_argument(
+        "--normalizar-formatos-historicos",
+        action="store_true",
+        help=(
+            "Reaplica una sola vez los formatos numericos y los colores de "
+            "estado a todos los bloques historicos reconocidos."
         ),
     )
     return parser.parse_args()
@@ -2339,6 +2350,97 @@ def find_historical_block_end_row(
     return last_content_row
 
 
+def clean_orphan_historical_metric_tails(
+    worksheet,
+    live_block,
+    mutation_batch=None,
+):
+    """Limpia restos K:M que no pertenecen a ningun bloque historico."""
+    values = get_worksheet_values(worksheet)
+    columns = live_block["columns"]
+    tail_keys = (
+        "top_impression_share",
+        "absolute_top_impression_share",
+        "daily_budget",
+    )
+    if not all(key in columns for key in tail_keys):
+        return []
+
+    marker_row = find_historical_marker_row(values)
+    start_col = min(columns.values())
+    end_col = max(columns.values())
+    tail_start_col = min(columns[key] for key in tail_keys)
+    covered_rows = set()
+
+    period_rows = [
+        row_index
+        for row_index in range(marker_row + 1, len(values) + 1)
+        if any(is_period_cell(value) for value in values[row_index - 1])
+    ]
+    for period_row in period_rows:
+        block_end_row = find_historical_block_end_row(
+            values,
+            period_row,
+            start_col,
+            end_col,
+        )
+        covered_rows.update(range(period_row, block_end_row + 1))
+
+    orphan_rows = []
+    for row_index in range(marker_row + 1, len(values) + 1):
+        if row_index in covered_rows:
+            continue
+        row = values[row_index - 1]
+        leading_values = row[start_col - 1:tail_start_col - 1]
+        tail_values = row[tail_start_col - 1:end_col]
+        if (
+            not any(str(value).strip() for value in leading_values)
+            and any(str(value).strip() for value in tail_values)
+        ):
+            orphan_rows.append(row_index)
+
+    ranges = []
+    for row_index in orphan_rows:
+        if ranges and row_index == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], row_index)
+        else:
+            ranges.append((row_index, row_index))
+
+    cleared_ranges = []
+    width = end_col - tail_start_col + 1
+    for first_row, last_row in ranges:
+        range_name = (
+            f"{gspread.utils.rowcol_to_a1(first_row, tail_start_col)}:"
+            f"{gspread.utils.rowcol_to_a1(last_row, end_col)}"
+        )
+        queue_values_update(
+            worksheet,
+            range_name,
+            [["" for _ in range(width)] for _ in range(last_row - first_row + 1)],
+            mutation_batch,
+        )
+        queue_format_requests(
+            worksheet,
+            [{
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": first_row - 1,
+                        "endRowIndex": last_row,
+                        "startColumnIndex": tail_start_col - 1,
+                        "endColumnIndex": end_col,
+                    },
+                    "cell": {"note": "", "userEnteredFormat": {}},
+                    "fields": "note,userEnteredFormat",
+                }
+            }],
+            mutation_batch,
+        )
+        cleared_ranges.append(range_name)
+
+    return cleared_ranges
+
+
 def resolve_historical_side_band_end(
     historical_block,
     target_end_row,
@@ -3072,12 +3174,12 @@ def apply_total_value_formats(
 ):
     number_format_by_key = {
         "clicks": ("NUMBER", "#,##0"),
-        "average_cpc": ("NUMBER", "#,##0.00"),
+        "average_cpc": ("NUMBER", OPTIONAL_DECIMAL_FORMAT),
         "cost": ("CURRENCY", TOTAL_CURRENCY_FORMAT),
-        "conversions": ("NUMBER", "#,##0.00"),
+        "conversions": ("NUMBER", OPTIONAL_DECIMAL_FORMAT),
         "cost_per_conversion": ("CURRENCY", TOTAL_CURRENCY_FORMAT),
         "impressions": ("NUMBER", "#,##0"),
-        "daily_budget": ("NUMBER", "#,##0.00"),
+        "daily_budget": ("NUMBER", OPTIONAL_DECIMAL_FORMAT),
     }
     requests = []
 
@@ -3168,6 +3270,178 @@ def apply_existing_total_currency_formats(
 
     queue_format_requests(worksheet, requests, mutation_batch)
     return formatted_rows
+
+
+def normalize_existing_standard_block_formats(
+    worksheet,
+    mutation_batch=None,
+):
+    """Normaliza formatos de todos los bloques estandar ya archivados."""
+    values = get_worksheet_values(worksheet)
+    header_rows = [
+        row_index
+        for row_index, row in enumerate(values, start=1)
+        if looks_like_campaign_header(row)
+    ]
+    result = {
+        "blocks": 0,
+        "campaigns": 0,
+        "totals": 0,
+    }
+
+    for header_position, header_row in enumerate(header_rows):
+        try:
+            columns = find_header_columns(values[header_row - 1])
+        except ValueError:
+            continue
+
+        next_header_row = (
+            header_rows[header_position + 1]
+            if header_position + 1 < len(header_rows)
+            else len(values) + 1
+        )
+        next_period_row = find_next_period_row(values, header_row)
+        block_stop_row = min(
+            next_header_row,
+            next_period_row or len(values) + 1,
+        ) - 1
+        campaign_col = columns["campaign_name"]
+        status_col = columns["campaign_status"]
+        campaign_rows = []
+        data_start_row = header_row + 1
+
+        for row_index in range(data_start_row, block_stop_row + 1):
+            row = values[row_index - 1]
+            campaign_name = (
+                row[campaign_col - 1]
+                if len(row) >= campaign_col
+                else ""
+            )
+            if not str(campaign_name).strip():
+                break
+            if any(is_total_cost_cell(value) for value in row):
+                break
+
+            campaign_status = (
+                row[status_col - 1]
+                if len(row) >= status_col
+                else ""
+            )
+            campaign_rows.append({
+                "campaign_status": campaign_status,
+            })
+
+        if not campaign_rows:
+            continue
+
+        data_end_row = data_start_row + len(campaign_rows) - 1
+        apply_campaign_value_formats(
+            worksheet,
+            columns,
+            data_start_row,
+            campaign_rows,
+            data_end_row,
+            mutation_batch,
+            apply_number_formats=True,
+            apply_status_formats=True,
+        )
+        result["blocks"] += 1
+        result["campaigns"] += len(campaign_rows)
+
+        try:
+            total_row = find_total_row(
+                values,
+                header_row,
+                min(columns.values()),
+                max(columns.values()),
+                stop_row=block_stop_row,
+            )
+        except ValueError:
+            continue
+
+        apply_total_value_formats(
+            worksheet,
+            columns,
+            total_row,
+            mutation_batch,
+        )
+        result["totals"] += 1
+
+    return result
+
+
+def normalize_enabled_conditional_format_colors(
+    spreadsheet,
+    selected_worksheets,
+    mutation_batch=None,
+):
+    """Cambia a verde suave solo reglas condicionales de texto `enabled`."""
+    selected_sheet_ids = {worksheet.id for worksheet in selected_worksheets}
+    metadata = spreadsheet.fetch_sheet_metadata(params={
+        "includeGridData": "false",
+        "fields": "sheets(properties(sheetId,title),conditionalFormats)",
+    })
+    requests = []
+    changed = []
+
+    for sheet in metadata.get("sheets", []):
+        properties = sheet.get("properties", {})
+        sheet_id = properties.get("sheetId")
+        if sheet_id not in selected_sheet_ids:
+            continue
+
+        for rule_index, rule in enumerate(sheet.get("conditionalFormats", [])):
+            boolean_rule = rule.get("booleanRule", {})
+            condition = boolean_rule.get("condition", {})
+            if condition.get("type") != "TEXT_CONTAINS":
+                continue
+            condition_values = [
+                normalize_text(value.get("userEnteredValue"))
+                for value in condition.get("values", [])
+            ]
+            if "enabled" not in condition_values:
+                continue
+
+            format_config = boolean_rule.get("format", {})
+            current_color = (
+                format_config.get("backgroundColorStyle", {})
+                .get("rgbColor")
+                or format_config.get("backgroundColor", {})
+            )
+            expected_color = ACCOUNT_STATUS_ENABLED_COLOR
+            if all(
+                abs(current_color.get(channel, 0) - expected_color[channel])
+                < 0.000001
+                for channel in ("red", "green", "blue")
+            ):
+                continue
+
+            updated_rule = json.loads(json.dumps(rule))
+            updated_format = updated_rule["booleanRule"].setdefault(
+                "format",
+                {},
+            )
+            updated_format["backgroundColor"] = dict(expected_color)
+            updated_format["backgroundColorStyle"] = {
+                "rgbColor": dict(expected_color),
+            }
+            requests.append({
+                "updateConditionalFormatRule": {
+                    "sheetId": sheet_id,
+                    "index": rule_index,
+                    "rule": updated_rule,
+                }
+            })
+            changed.append({
+                "worksheet": properties.get("title", ""),
+                "rule_index": rule_index,
+            })
+
+    if mutation_batch is not None:
+        mutation_batch.add_requests(requests)
+    elif requests:
+        spreadsheet.batch_update({"requests": requests})
+    return changed
 
 
 def apply_live_block_borders(
@@ -3400,12 +3674,15 @@ def apply_campaign_value_formats(
     status_col = columns["campaign_status"]
     number_format_by_key = {
         "clicks": "#,##0",
-        "average_cpc": "#,##0.00",
-        "cost": "#,##0.00",
-        "conversions": "#,##0.00",
-        "cost_per_conversion": "#,##0.00",
+        "ctr": OPTIONAL_DECIMAL_FORMAT,
+        "average_cpc": OPTIONAL_DECIMAL_FORMAT,
+        "cost": OPTIONAL_DECIMAL_FORMAT,
+        "conversions": OPTIONAL_DECIMAL_FORMAT,
+        "cost_per_conversion": OPTIONAL_DECIMAL_FORMAT,
         "impressions": "#,##0",
-        "daily_budget": "#,##0.00",
+        "top_impression_share": OPTIONAL_DECIMAL_FORMAT,
+        "absolute_top_impression_share": OPTIONAL_DECIMAL_FORMAT,
+        "daily_budget": OPTIONAL_DECIMAL_FORMAT,
     }
     requests = []
 
@@ -3482,7 +3759,7 @@ def apply_campaign_value_formats(
                 normalize_text(campaign["campaign_status"]) == "enabled"
             )
             background_color = (
-                {"red": 0, "green": 1, "blue": 0}
+                ACCOUNT_STATUS_ENABLED_COLOR
                 if is_enabled
                 else {"red": 1, "green": 0, "blue": 0}
             )
@@ -3672,7 +3949,7 @@ def update_live_block(
         len(campaign_rows),
         total_row,
         mutation_batch,
-        apply_formats=structure_changed,
+        apply_formats=True,
     )
     if structure_changed or force_formats:
         apply_live_block_borders(
@@ -3693,8 +3970,8 @@ def update_live_block(
         campaign_rows,
         clear_end_row,
         mutation_batch,
-        apply_number_formats=structure_changed or force_formats,
-        apply_status_formats=statuses_changed,
+        apply_number_formats=True,
+        apply_status_formats=True,
     )
 
     return {
@@ -3708,7 +3985,7 @@ def update_live_block(
         "inserted_rows": inserted_rows,
         "deleted_rows": deleted_rows,
         "obsolete_clear_ranges": obsolete_clear_ranges,
-        "formats_updated": force_formats or structure_changed or statuses_changed,
+        "formats_updated": True,
     }
 
 
@@ -4523,11 +4800,11 @@ def queue_legacy_historical_historical_total(
 
     number_formats = {
         "clicks": ("NUMBER", "#,##0"),
-        "ctr": ("PERCENT", "0.00%"),
-        "average_cpc": ("CURRENCY", "[$\u20ac]#,##0.00"),
-        "cost": ("CURRENCY", "[$\u20ac]#,##0.00"),
-        "conversions": ("NUMBER", "#,##0.00"),
-        "cost_per_conversion": ("CURRENCY", "[$\u20ac]#,##0.00"),
+        "ctr": ("PERCENT", OPTIONAL_PERCENT_FORMAT),
+        "average_cpc": ("CURRENCY", OPTIONAL_CURRENCY_FORMAT),
+        "cost": ("CURRENCY", OPTIONAL_CURRENCY_FORMAT),
+        "conversions": ("NUMBER", OPTIONAL_DECIMAL_FORMAT),
+        "cost_per_conversion": ("CURRENCY", OPTIONAL_CURRENCY_FORMAT),
         "impressions": ("NUMBER", "#,##0"),
     }
     for key, (format_type, pattern) in number_formats.items():
@@ -5323,6 +5600,85 @@ def plan_monthly_renewal_updates(
     return result
 
 
+def plan_monthly_budget_carry_forward(
+    values,
+    period_targets,
+    target_day,
+    enabled=False,
+):
+    """Copia el ultimo presupuesto al periodo vigente sin ampliar contrato."""
+    result = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "value_update": None,
+        "period_label": None,
+        "reason": None,
+    }
+    if not result["enabled"]:
+        return result
+
+    active_targets = [
+        target
+        for target in period_targets
+        if target["period_context"]["start_day"]
+        <= target_day
+        <= target["period_context"]["end_day"]
+    ]
+    if len(active_targets) != 1:
+        result["reason"] = "No hay un unico periodo vigente para copiar presupuesto."
+        return result
+
+    current_target = active_targets[0]
+    current_cell = current_target.get("monthly_budget_cell")
+    if not current_cell:
+        result["reason"] = "El periodo vigente no tiene columna 'Presup mes'."
+        return result
+
+    current_row, current_col = gspread.utils.a1_to_rowcol(current_cell)
+    current_value = (
+        values[current_row - 1][current_col - 1]
+        if len(values) >= current_row
+        and len(values[current_row - 1]) >= current_col
+        else ""
+    )
+    if str(current_value).strip():
+        result["reason"] = "El presupuesto vigente ya esta informado."
+        return result
+
+    previous_targets = [
+        target
+        for target in period_targets
+        if target["period_context"]["end_day"]
+        < current_target["period_context"]["start_day"]
+    ]
+    for previous_target in reversed(previous_targets):
+        source_cell = previous_target.get("monthly_budget_cell")
+        if not source_cell:
+            continue
+        source_row, source_col = gspread.utils.a1_to_rowcol(source_cell)
+        source_value = (
+            values[source_row - 1][source_col - 1]
+            if len(values) >= source_row
+            and len(values[source_row - 1]) >= source_col
+            else ""
+        )
+        if not str(source_value).strip():
+            continue
+
+        result["value_update"] = {
+            "cell": current_cell,
+            "value": source_value,
+            "kind": "monthly_budget_carry_forward",
+            "source_cell": source_cell,
+        }
+        result["period_label"] = current_target["month_label"]
+        result["applied"] = True
+        return result
+
+    result["reason"] = "No existe un presupuesto anterior informado."
+    return result
+
+
 def contract_month_context(month_day, contract_range, target_day):
     month_end = date(
         month_day.year,
@@ -5693,7 +6049,12 @@ def select_saldo_period_targets(ordered_targets, target_day):
     }
 
 
-def find_saldo_targets(worksheet, target_day, continuous_contract=False):
+def find_saldo_targets(
+    worksheet,
+    target_day,
+    continuous_contract=False,
+    carry_forward_monthly_budget=False,
+):
     values = get_worksheet_values(worksheet)
     contract_range = (
         find_contract_date_range(values)
@@ -5996,6 +6357,12 @@ def find_saldo_targets(worksheet, target_day, continuous_contract=False):
         ordered_targets,
         target_day,
     )
+    budget_carry_forward = plan_monthly_budget_carry_forward(
+        values,
+        ordered_targets,
+        target_day,
+        enabled=carry_forward_monthly_budget,
+    )
     selected = select_saldo_period_targets(ordered_targets, target_day)
     selected["sequence_cells"] = sequence_cells
     selected["period_targets"] = ordered_targets
@@ -6003,6 +6370,7 @@ def find_saldo_targets(worksheet, target_day, continuous_contract=False):
     selected["continuous_contract_range"] = contract_range
     selected["continuous_contract_updates"] = contract_updates
     selected["monthly_renewal"] = monthly_renewal
+    selected["budget_carry_forward"] = budget_carry_forward
     selected["period_context"] = (
         selected["target"]["period_context"]
         if selected["target"]
@@ -6606,7 +6974,7 @@ def queue_annual_control_status_rules(
                             }],
                         },
                         "format": {
-                            "backgroundColor": {"red": 0, "green": 1, "blue": 0},
+                            "backgroundColor": ACCOUNT_STATUS_ENABLED_COLOR,
                             "textFormat": {
                                 "foregroundColor": {"red": 0, "green": 0, "blue": 0}
                             },
@@ -6739,12 +7107,12 @@ def update_annual_control_block(
         "F": {"type": "DATE", "pattern": "yyyy-mm-dd"},
         "G": {"type": "NUMBER", "pattern": "#,##0"},
         "H": {"type": "NUMBER", "pattern": "#,##0"},
-        "I": {"type": "NUMBER", "pattern": "0.00"},
-        "J": {"type": "CURRENCY", "pattern": "#,##0.00\\ [$\u20ac-1]"},
-        "K": {"type": "CURRENCY", "pattern": "#,##0.00\\ [$\u20ac-1]"},
-        "L": {"type": "CURRENCY", "pattern": "#,##0.00\\ [$\u20ac-1]"},
-        "M": {"type": "CURRENCY", "pattern": "#,##0.00\\ [$\u20ac-1]"},
-        "N": {"type": "CURRENCY", "pattern": "#,##0.00\\ [$\u20ac-1]"},
+        "I": {"type": "NUMBER", "pattern": OPTIONAL_DECIMAL_FORMAT},
+        "J": {"type": "CURRENCY", "pattern": "#,##0.##\\ [$\u20ac-1]"},
+        "K": {"type": "CURRENCY", "pattern": "#,##0.##\\ [$\u20ac-1]"},
+        "L": {"type": "CURRENCY", "pattern": "#,##0.##\\ [$\u20ac-1]"},
+        "M": {"type": "CURRENCY", "pattern": "#,##0.##\\ [$\u20ac-1]"},
+        "N": {"type": "CURRENCY", "pattern": "#,##0.##\\ [$\u20ac-1]"},
     }
     format_requests = []
     for column_letter, number_format in number_formats.items():
@@ -7323,6 +7691,10 @@ def prepare_sem_client(sem_client, worksheet, target_day):
                 "continuous_contract_months",
                 False,
             ),
+            carry_forward_monthly_budget=sem_client.get(
+                "carry_forward_monthly_budget",
+                False,
+            ),
         )
     except SaldoPeriodValidationError as exc:
         print(f"ERROR: {exc}")
@@ -7502,6 +7874,24 @@ def process_sem_client(prepared, ads_data, mutation_batch):
             )
         )
 
+    budget_carry_forward = saldo_targets.get(
+        "budget_carry_forward",
+        {},
+    )
+    if budget_carry_forward.get("applied"):
+        budget_update = budget_carry_forward["value_update"]
+        queue_values_update(
+            worksheet,
+            budget_update["cell"],
+            [[budget_update["value"]]],
+            mutation_batch,
+        )
+        print(
+            "Presupuesto mensual arrastrado: "
+            f"{budget_update['source_cell']} -> {budget_update['cell']} "
+            f"({budget_carry_forward['period_label']})."
+        )
+
     monthly_renewal = saldo_targets.get("monthly_renewal", {})
     for update in monthly_renewal.get("value_updates", []):
         queue_values_update(
@@ -7577,6 +7967,11 @@ def process_sem_client(prepared, ads_data, mutation_batch):
         block,
         mutation_batch,
     )
+    orphan_historical_ranges = clean_orphan_historical_metric_tails(
+        worksheet,
+        block,
+        mutation_batch,
+    )
 
     print(f"Pestana procesada: {worksheet.title}")
     print(
@@ -7598,6 +7993,11 @@ def process_sem_client(prepared, ads_data, mutation_batch):
                 f"fila {item['total_row']})"
                 for item in repaired_historical_totals
             )
+        )
+    if orphan_historical_ranges:
+        print(
+            "Restos historicos aislados limpiados: "
+            + ", ".join(orphan_historical_ranges)
         )
 
     if saldo_targets.get("ignored_period_cells"):
@@ -8045,6 +8445,101 @@ def main():
         selected_worksheets,
         target_day,
     )
+
+    if args.normalizar_formatos_historicos:
+        print(
+            "Normalizando formatos historicos existentes "
+            "(operacion puntual)..."
+        )
+        format_batch = SpreadsheetMutationBatch(spreadsheet)
+        pending_format_names = []
+        normalized_totals = {
+            "worksheets": 0,
+            "blocks": 0,
+            "campaigns": 0,
+            "totals": 0,
+        }
+
+        for sem_client in selected_clients:
+            if sem_client.get("handler") == ANNUAL_CONTROL_HANDLER:
+                continue
+            worksheet = worksheets_by_title.get(sem_client["worksheet_name"])
+            if worksheet is None:
+                continue
+
+            checkpoint = format_batch.checkpoint()
+            try:
+                normalized = normalize_existing_standard_block_formats(
+                    worksheet,
+                    format_batch,
+                )
+            except (Exception, SystemExit) as exc:
+                format_batch.rollback(checkpoint)
+                if not process_all:
+                    raise
+                failures.append((
+                    sem_client["worksheet_name"],
+                    f"Normalizacion historica: {exc}",
+                ))
+                print(
+                    "ERROR normalizando formatos historicos de "
+                    f"{sem_client['worksheet_name']}: {exc}"
+                )
+                continue
+
+            format_batch.mark_client()
+            pending_format_names.append(sem_client["worksheet_name"])
+            normalized_totals["worksheets"] += 1
+            for key in ("blocks", "campaigns", "totals"):
+                normalized_totals[key] += normalized[key]
+
+            # Los historicos largos generan muchas operaciones de formato.
+            # Se limita cada envio a tres fichas para mantener peticiones
+            # pequenas y recuperables.
+            if len(pending_format_names) >= 3:
+                flush_result = format_batch.flush()
+                print(
+                    "Formatos historicos normalizados: "
+                    f"{', '.join(pending_format_names)} "
+                    f"({flush_result['format_requests']} operaciones)."
+                )
+                pending_format_names = []
+
+        if pending_format_names:
+            flush_result = format_batch.flush()
+            print(
+                "Formatos historicos normalizados: "
+                f"{', '.join(pending_format_names)} "
+                f"({flush_result['format_requests']} operaciones)."
+            )
+
+        conditional_batch = SpreadsheetMutationBatch(spreadsheet)
+        changed_conditional_rules = (
+            normalize_enabled_conditional_format_colors(
+                spreadsheet,
+                selected_worksheets,
+                conditional_batch,
+            )
+        )
+        conditional_batch.flush()
+        if changed_conditional_rules:
+            changed_rule_names = sorted({
+                item["worksheet"]
+                for item in changed_conditional_rules
+            })
+            print(
+                "Reglas condicionales `enabled` corregidas: "
+                f"{len(changed_conditional_rules)} en "
+                f"{', '.join(changed_rule_names)}."
+            )
+
+        print(
+            "Normalizacion historica completada: "
+            f"{normalized_totals['worksheets']} fichas, "
+            f"{normalized_totals['blocks']} bloques, "
+            f"{normalized_totals['campaigns']} campanas y "
+            f"{normalized_totals['totals']} totales."
+        )
 
     for sem_client in selected_clients:
         worksheet = worksheets_by_title.get(sem_client["worksheet_name"])
