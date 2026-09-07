@@ -2212,12 +2212,13 @@ def process_daily_sheet_for_client(
             target_day,
             create_if_missing
         )
-    except WorksheetNotFound:
-        print(
+    except WorksheetNotFound as exc:
+        raise RuntimeError(
             f"No existe la hoja diaria '{daily_sheet_name}'. "
-            "Salto esta hoja para no crear meses antiguos automaticamente."
-        )
-        return []
+            "Se detiene este proceso antes de actualizar el resumen mensual "
+            "para conservar los importes existentes. Restaura la pestana o "
+            "corrige su nombre en la configuracion y vuelve a ejecutar."
+        ) from exc
 
     daily_sheet_name = worksheet.title
     update_daily_sheet_date_headers(worksheet, target_day, target_day)

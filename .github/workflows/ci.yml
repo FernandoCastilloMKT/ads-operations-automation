@@ -36,6 +36,12 @@ jobs:
       - name: Validar sintaxis Python
         run: python -m compileall -q scripts tests
 
+      - name: Validar herramientas y estructura privada
+        if: ${{ hashFiles('docs/repository-map.json') != '' }}
+        run: |
+          python -m compileall -q tools
+          python tools/maintenance/check_repository.py
+
       - name: Ejecutar suite local simulada
         run: python -m pytest -q
 
