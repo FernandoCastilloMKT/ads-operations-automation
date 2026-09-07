@@ -6,6 +6,9 @@
   "saldo_email_recipients": [
     "alerts@example.invalid"
   ],
+  "end_date_email_recipients": [
+    "alerts@example.invalid"
+  ],
   "calendar_client_exceptions_after_stop": [],
   "legacy_renewal_note_prefixes": [],
   "legacy_button_handlers": [],

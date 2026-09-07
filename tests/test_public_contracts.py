@@ -43,6 +43,22 @@ class PublicConfigurationTests(unittest.TestCase):
             data = json.loads(manifest.read_text(encoding="utf-8"))
             self.assertEqual(data["executionApi"]["access"], "MYSELF")
 
+    def test_end_date_alert_is_property_configured(self):
+        source = (
+            ROOT
+            / "apps-script"
+            / "projects"
+            / "02-fichas-alertas"
+            / "02_ALERTAS_SALDO.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("FINSEM_01_revisarYEnviarAlertas", source)
+        self.assertIn("FINSEM_90_previsualizarSinEnviar", source)
+        self.assertIn("SEM_END_DATE_RECIPIENTS", source)
+        self.assertNotRegex(
+            source,
+            r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}",
+        )
+
     @unittest.skipUnless(
         (ROOT / ".public-runner").is_file(),
         "Contrato exclusivo del paquete publico.",
@@ -109,6 +125,16 @@ class PublicConfigurationTests(unittest.TestCase):
                 continue
             text = path.read_text(encoding="utf-8")
             self.assertIsNone(identity.search(text), path)
+
+    @unittest.skipUnless(
+        (ROOT / ".public-runner").is_file(),
+        "Contrato exclusivo del paquete publico.",
+    )
+    def test_public_readme_explains_sanitized_build(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("explicit allowlist", readme)
+        self.assertIn("audit_public_repository.py", readme)
+        self.assertIn("Supermetrics", readme)
 
 
 if __name__ == "__main__":

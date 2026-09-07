@@ -64,9 +64,9 @@ ACCOUNT_STATUS_ENABLED = "Enabled"
 ACCOUNT_STATUS_PAUSED = "Paused"
 ACCOUNT_STATUS_FINISHED = "Finalizada"
 ACCOUNT_STATUS_ENABLED_COLOR = {
-    "red": 183 / 255,
-    "green": 225 / 255,
-    "blue": 205 / 255,
+    "red": 0,
+    "green": 1,
+    "blue": 0,
 }
 ACCOUNT_STATUS_DISABLED_COLOR = {"red": 1, "green": 0, "blue": 0}
 VISTA_GLOBAL_SIGNED_MARKER = "Clientes firmados sin comenzar"
@@ -76,13 +76,20 @@ VISTA_GLOBAL_STATUS_COLUMN = 0
 VISTA_GLOBAL_CLIENT_COLUMN = 2
 VISTA_GLOBAL_MONTHLY_BUDGET_COLUMN = 7
 MONTHLY_RENEWAL_TEXT = "Renueva mes a mes sin fecha fin"
+MONTHLY_RENEWAL_TEXTS = (
+    MONTHLY_RENEWAL_TEXT,
+    "Renueva mes a mes hasta nueva orden",
+)
 MONTHLY_RENEWAL_NOTE_PREFIX = (
     "SEM - ultima renovacion mensual: "
 )
 OPTIONAL_DECIMAL_FORMAT = "#,##0.##"
 OPTIONAL_PERCENT_FORMAT = "0.##%"
 OPTIONAL_CURRENCY_FORMAT = "[$\u20ac]#,##0.##"
+INTEGER_CURRENCY_FORMAT = "[$\u20ac]#,##0"
 TOTAL_CURRENCY_FORMAT = OPTIONAL_CURRENCY_FORMAT
+INTEGER_NUMBER_FORMAT = "#,##0"
+INTEGER_PERCENT_FORMAT = "0%"
 GOOGLE_SHEETS_DATE_EPOCH = date(1899, 12, 30)
 
 
@@ -278,11 +285,20 @@ HEADER_ALIASES = {
     "ctr": ["CTR"],
     "average_cpc": ["CPC"],
     "cost": ["Costo", "Coste", "Cost"],
-    "conversions": ["Conversiones", "Conversions"],
+    "conversions": [
+        "Conversiones",
+        "Conversions",
+        "Todas las conversiones",
+        "All conversions",
+    ],
     "cost_per_conversion": [
         "Costo por conversion",
         "Costo por conversión",
         "Cost per conversion",
+        "Valor total de conversion",
+        "Valor total de conversión",
+        "Valor de todas las conversiones",
+        "All conversions value",
     ],
     "impressions": ["Impresiones", "Impressions"],
     "top_impression_share": [
@@ -304,6 +320,8 @@ OBSOLETE_HEADER_ALIASES = {
         "Valor de conversion",
         "Valor de conversión",
         "Valor de conversiones",
+        "Valor total de conversion",
+        "Valor total de conversión",
         "Conversion value",
     ],
     "all_conversions": [
@@ -950,13 +968,19 @@ def parse_date_range(
 
 
 def month_label_for_day(day):
-    return f"Periodo seleccionado: {day.year} {MONTH_NAMES_ES[day.month]}"
+    month_name = MONTH_NAMES_ES[day.month].capitalize()
+    return f"Periodo seleccionado: {month_name} {day.year}"
 
 
 def range_label_for_days(start_day, end_day):
+    if start_day.year == end_day.year:
+        return (
+            "Periodo seleccionado: "
+            f"{start_day:%d/%m} - {end_day:%d/%m} {end_day.year}"
+        )
     return (
         "Periodo seleccionado: "
-        f"{start_day.year} {start_day:%d/%m} - {end_day:%d/%m}"
+        f"{start_day:%d/%m/%Y} - {end_day:%d/%m/%Y}"
     )
 
 
@@ -1168,6 +1192,15 @@ def find_obsolete_header_columns(header_row):
     return columns
 
 
+def is_legacy_conversion_value_header(value):
+    legacy_aliases = {
+        normalize_text(alias)
+        for key in ("conversion_value", "all_conversions_value")
+        for alias in OBSOLETE_HEADER_ALIASES[key]
+    }
+    return normalize_text(value) in legacy_aliases
+
+
 def looks_like_campaign_header(row):
     normalized_values = {normalize_text(value) for value in row}
     return (
@@ -1197,6 +1230,12 @@ def build_block_from_header(
 ):
     header_row = header_values or values[header_row_index - 1]
     columns = find_header_columns(header_row)
+    required_column_indexes = set(columns.values())
+    obsolete_columns = {
+        key: col_index
+        for key, col_index in find_obsolete_header_columns(header_row).items()
+        if col_index not in required_column_indexes
+    }
 
     return {
         "values": values,
@@ -1207,7 +1246,7 @@ def build_block_from_header(
         "header_template_row": header_template_row or header_row_index,
         "historical_marker_row": historical_marker_row,
         "columns": columns,
-        "obsolete_columns": find_obsolete_header_columns(header_row),
+        "obsolete_columns": obsolete_columns,
     }
 
 
@@ -1412,6 +1451,8 @@ def parse_sheet_number(value):
             text = text.replace(",", "")
     elif "," in text:
         text = text.replace(",", ".")
+    elif re.fullmatch(r"[+\-]?[1-9]\d{0,2}(?:\.\d{3})+", text):
+        text = text.replace(".", "")
     elif text.count(".") > 1:
         parts = text.split(".")
         text = "".join(parts[:-1]) + "." + parts[-1]
@@ -1420,6 +1461,82 @@ def parse_sheet_number(value):
         return float(text)
     except ValueError:
         return 0.0
+
+
+def optional_number_format_for_value(
+    value,
+    decimal_pattern=OPTIONAL_DECIMAL_FORMAT,
+    integer_pattern=INTEGER_NUMBER_FORMAT,
+):
+    """Usa un formato entero cuando no hay decimales que mostrar."""
+    number = parse_sheet_number(value)
+    visible_number = round(number, 2)
+    if abs(visible_number - round(visible_number)) < 1e-9:
+        return integer_pattern
+    return decimal_pattern
+
+
+def optional_decimal_format_for_value(value):
+    """Evita que Sheets deje una coma final en valores enteros."""
+    return optional_number_format_for_value(value)
+
+
+def optional_currency_format_for_value(value):
+    return optional_number_format_for_value(
+        value,
+        decimal_pattern=OPTIONAL_CURRENCY_FORMAT,
+        integer_pattern=INTEGER_CURRENCY_FORMAT,
+    )
+
+
+def optional_percent_format_for_value(value):
+    return optional_number_format_for_value(
+        value,
+        decimal_pattern=OPTIONAL_PERCENT_FORMAT,
+        integer_pattern=INTEGER_PERCENT_FORMAT,
+    )
+
+
+def campaign_sort_key(campaign):
+    is_enabled = normalize_text(campaign.get("campaign_status")) == "enabled"
+    cost = parse_sheet_number(
+        campaign.get("raw_cost", campaign.get("cost", 0))
+    )
+    return (
+        0 if is_enabled else 1,
+        -cost,
+        normalize_text(campaign.get("campaign_name")),
+        str(campaign.get("campaign_id", "")),
+    )
+
+
+def sort_campaign_rows(campaign_rows):
+    return sorted(campaign_rows, key=campaign_sort_key)
+
+
+def summarize_campaign_metrics(campaign_rows):
+    clicks = sum(parse_sheet_number(row.get("clicks", 0)) for row in campaign_rows)
+    impressions = sum(
+        parse_sheet_number(row.get("impressions", 0))
+        for row in campaign_rows
+    )
+    cost = sum(
+        parse_sheet_number(row.get("raw_cost", row.get("cost", 0)))
+        for row in campaign_rows
+    )
+    conversions = sum(
+        parse_sheet_number(row.get("conversions", 0))
+        for row in campaign_rows
+    )
+    return {
+        "clicks": clicks,
+        "ctr": clicks / impressions if impressions else 0,
+        "average_cpc": cost / clicks if clicks else 0,
+        "cost": cost,
+        "conversions": conversions,
+        "cost_per_conversion": cost / conversions if conversions else 0,
+        "impressions": impressions,
+    }
 
 
 def format_share(value):
@@ -1696,13 +1813,7 @@ def build_campaign_rows_from_daily_aggregates(campaigns):
             "raw_cost": cost,
         })
 
-    rows.sort(
-        key=lambda item: (
-            normalize_text(item["campaign_name"]),
-            item["campaign_id"],
-        )
-    )
-    return rows
+    return sort_campaign_rows(rows)
 
 
 def apply_exact_impression_shares(period_rows, exact_shares):
@@ -1969,14 +2080,8 @@ def combine_google_ads_account_results(account_results):
                 )
                 combined_rows.append(combined_row)
 
-    for rows in period_rows.values():
-        rows.sort(
-            key=lambda item: (
-                normalize_text(item["campaign_name"]),
-                item["source_customer_id"],
-                item["campaign_id"],
-            )
-        )
+    for period_key, rows in period_rows.items():
+        period_rows[period_key] = sort_campaign_rows(rows)
 
     unique_statuses = sorted(set(account_statuses.values()))
     if len(unique_statuses) == 1:
@@ -2698,6 +2803,12 @@ def archive_live_block_if_needed(worksheet, block, period_context):
     destination_header_row = destination_start_row + 1
     destination_data_start_row = destination_header_row + 1
     if campaign_count != 1:
+        archived_campaign_rows = extract_campaign_rows_from_block(
+            block["values"],
+            columns,
+            data_start_row,
+            data_start_row + campaign_count - 1,
+        )
         destination_total_row = destination_end_row
         update_total_formulas(
             worksheet,
@@ -2707,6 +2818,24 @@ def archive_live_block_if_needed(worksheet, block, period_context):
             destination_data_start_row,
             campaign_count,
             destination_total_row,
+            conversion_total=sum(
+                parse_sheet_number(
+                    block["values"][block["header_row"] + offset][
+                        columns["conversions"] - 1
+                    ]
+                    if (
+                        len(block["values"]) > block["header_row"] + offset
+                        and len(
+                            block["values"][block["header_row"] + offset]
+                        ) >= columns["conversions"]
+                    )
+                    else 0
+                )
+                for offset in range(campaign_count)
+            ),
+            metric_totals=summarize_campaign_metrics(
+                archived_campaign_rows
+            ),
         )
         apply_live_block_borders(
             worksheet,
@@ -3054,6 +3183,12 @@ def repair_missing_historical_totals(
             total_row,
             mutation_batch,
         )
+        repaired_campaign_rows = extract_campaign_rows_from_block(
+            values,
+            columns,
+            data_start_row,
+            data_start_row + missing["campaign_count"] - 1,
+        )
         update_total_formulas(
             worksheet,
             columns,
@@ -3063,6 +3198,20 @@ def repair_missing_historical_totals(
             missing["campaign_count"],
             total_row,
             mutation_batch,
+            conversion_total=sum(
+                parse_sheet_number(
+                    values[row_index - 1][columns["conversions"] - 1]
+                    if len(values[row_index - 1]) >= columns["conversions"]
+                    else 0
+                )
+                for row_index in range(
+                    data_start_row,
+                    data_start_row + missing["campaign_count"],
+                )
+            ),
+            metric_totals=summarize_campaign_metrics(
+                repaired_campaign_rows
+            ),
         )
         apply_live_block_borders(
             worksheet,
@@ -3109,7 +3258,8 @@ def repair_missing_historical_totals(
 
 def update_total_formulas(worksheet, columns, start_col, end_col, data_start_row,
                           campaign_count, total_row, mutation_batch=None,
-                          apply_formats=True):
+                          apply_formats=True, conversion_total=None,
+                          metric_totals=None):
     width = end_col - start_col + 1
     total_row_values = ["" for _ in range(width)]
 
@@ -3161,6 +3311,8 @@ def update_total_formulas(worksheet, columns, start_col, end_col, data_start_row
             columns,
             total_row,
             mutation_batch,
+            conversion_value=conversion_total,
+            metric_values=metric_totals,
         )
 
     return col_letter("cost_per_conversion")
@@ -3171,15 +3323,44 @@ def apply_total_value_formats(
     columns,
     total_row,
     mutation_batch=None,
+    conversion_value=None,
+    metric_values=None,
 ):
+    metric_values = dict(metric_values or {})
+    if conversion_value is not None:
+        metric_values.setdefault("conversions", conversion_value)
+
     number_format_by_key = {
         "clicks": ("NUMBER", "#,##0"),
-        "average_cpc": ("NUMBER", OPTIONAL_DECIMAL_FORMAT),
-        "cost": ("CURRENCY", TOTAL_CURRENCY_FORMAT),
-        "conversions": ("NUMBER", OPTIONAL_DECIMAL_FORMAT),
-        "cost_per_conversion": ("CURRENCY", TOTAL_CURRENCY_FORMAT),
+        "average_cpc": (
+            "NUMBER",
+            optional_decimal_format_for_value(
+                metric_values.get("average_cpc", 0)
+            ),
+        ),
+        "cost": (
+            "CURRENCY",
+            optional_currency_format_for_value(metric_values.get("cost", 0)),
+        ),
+        "conversions": (
+            "NUMBER",
+            optional_decimal_format_for_value(
+                metric_values.get("conversions", 0)
+            ),
+        ),
+        "cost_per_conversion": (
+            "CURRENCY",
+            optional_currency_format_for_value(
+                metric_values.get("cost_per_conversion", 0)
+            ),
+        ),
         "impressions": ("NUMBER", "#,##0"),
-        "daily_budget": ("NUMBER", OPTIONAL_DECIMAL_FORMAT),
+        "daily_budget": (
+            "NUMBER",
+            optional_decimal_format_for_value(
+                metric_values.get("daily_budget", 0)
+            ),
+        ),
     }
     requests = []
 
@@ -3230,11 +3411,13 @@ def find_columns_for_total_row(values, total_row):
 def apply_existing_total_currency_formats(
     worksheet,
     mutation_batch=None,
+    metric_totals_by_row=None,
 ):
     """Anade la unidad EUR a todos los totales vivos e historicos existentes."""
     values = get_worksheet_values(worksheet)
     requests = []
     formatted_rows = []
+    metric_totals_by_row = metric_totals_by_row or {}
 
     for total_row, row in enumerate(values, start=1):
         if not any(is_total_cost_cell(value) for value in row):
@@ -3246,6 +3429,10 @@ def apply_existing_total_currency_formats(
 
         for key in ("cost", "cost_per_conversion"):
             col_index = columns[key]
+            value = metric_totals_by_row.get(total_row, {}).get(
+                key,
+                row[col_index - 1] if len(row) >= col_index else 0,
+            )
             requests.append({
                 "repeatCell": {
                     "range": {
@@ -3259,7 +3446,9 @@ def apply_existing_total_currency_formats(
                         "userEnteredFormat": {
                             "numberFormat": {
                                 "type": "CURRENCY",
-                                "pattern": TOTAL_CURRENCY_FORMAT,
+                                "pattern": optional_currency_format_for_value(
+                                    value
+                                ),
                             }
                         }
                     },
@@ -3270,6 +3459,151 @@ def apply_existing_total_currency_formats(
 
     queue_format_requests(worksheet, requests, mutation_batch)
     return formatted_rows
+
+
+def extract_campaign_rows_from_block(
+    values,
+    columns,
+    data_start_row,
+    block_stop_row,
+):
+    campaign_rows = []
+    optional_keys = {
+        "cost_per_conversion",
+        "top_impression_share",
+        "absolute_top_impression_share",
+    }
+    header_row = values[data_start_row - 2] if data_start_row >= 2 else []
+    cost_per_conversion_col = columns["cost_per_conversion"]
+    cost_per_conversion_header = (
+        header_row[cost_per_conversion_col - 1]
+        if len(header_row) >= cost_per_conversion_col
+        else ""
+    )
+    migrate_conversion_value = is_legacy_conversion_value_header(
+        cost_per_conversion_header
+    )
+
+    for row_index in range(data_start_row, block_stop_row + 1):
+        row = values[row_index - 1]
+        campaign_name_col = columns["campaign_name"]
+        campaign_name = (
+            row[campaign_name_col - 1]
+            if len(row) >= campaign_name_col
+            else ""
+        )
+        if not str(campaign_name).strip():
+            break
+        if any(is_total_cost_cell(value) for value in row):
+            break
+
+        campaign = {
+            "campaign_id": f"sheet-row:{row_index}",
+            "campaign_name": str(campaign_name).strip(),
+        }
+        for key, col_index in columns.items():
+            if key == "campaign_name":
+                continue
+            value = row[col_index - 1] if len(row) >= col_index else ""
+            if key == "campaign_status":
+                campaign[key] = str(value).strip()
+            elif key in optional_keys and not str(value).strip():
+                campaign[key] = ""
+            else:
+                campaign[key] = parse_sheet_number(value)
+
+        campaign["raw_cost"] = parse_sheet_number(campaign.get("cost", 0))
+        if migrate_conversion_value:
+            conversions = parse_sheet_number(campaign.get("conversions", 0))
+            campaign["cost_per_conversion"] = (
+                campaign["raw_cost"] / conversions
+                if conversions
+                else ""
+            )
+        campaign_rows.append(campaign)
+
+    return campaign_rows
+
+
+def canonical_period_label(period_identity):
+    if period_identity["mode"] == "range":
+        return range_label_for_days(
+            period_identity["start_day"],
+            period_identity["end_day"],
+        )
+    return month_label_for_day(period_identity["start_day"])
+
+
+def existing_period_label_updates(values):
+    entries = []
+    for row_index, row in enumerate(values, start=1):
+        for col_index, value in enumerate(row, start=1):
+            if not is_period_cell(value):
+                continue
+            start_month = (
+                parse_period_month_number(value)
+                or date_range_start_month(value)
+            )
+            entries.append({
+                "row": row_index,
+                "col": col_index,
+                "value": value,
+                "month": start_month,
+                "explicit_start": (
+                    parse_period_identity(value, today_in_spain())
+                    if extract_explicit_year(value) is not None
+                    else None
+                ),
+            })
+            break
+
+    historical_marker_row = None
+    try:
+        historical_marker_row = find_historical_marker_row(values)
+    except ValueError:
+        pass
+
+    historical_entries = [
+        entry
+        for entry in entries
+        if historical_marker_row is not None
+        and entry["row"] > historical_marker_row
+    ]
+    updates = []
+    for entry in entries:
+        identity = entry["explicit_start"]
+        if identity is None and entry in historical_entries and entry["month"]:
+            inferred_year = infer_historical_month_year(
+                historical_entries,
+                entry["row"],
+            )
+            if inferred_year:
+                reference_day = date(
+                    inferred_year,
+                    entry["month"],
+                    1,
+                )
+                identity = parse_period_identity(
+                    entry["value"],
+                    reference_day,
+                )
+                if identity is None:
+                    identity = {
+                        "mode": "month",
+                        "start_day": reference_day,
+                    }
+
+        if identity is None:
+            continue
+        label = canonical_period_label(identity)
+        if str(entry["value"]).strip() == label:
+            continue
+        updates.append({
+            "cell": gspread.utils.rowcol_to_a1(entry["row"], entry["col"]),
+            "value": label,
+        })
+
+    return updates
 
 
 def normalize_existing_standard_block_formats(
@@ -3287,13 +3621,50 @@ def normalize_existing_standard_block_formats(
         "blocks": 0,
         "campaigns": 0,
         "totals": 0,
+        "sorted_blocks": 0,
+        "period_labels": 0,
     }
+
+    period_updates = existing_period_label_updates(values)
+    for update in period_updates:
+        queue_values_update(
+            worksheet,
+            update["cell"],
+            [[update["value"]]],
+            mutation_batch,
+        )
+    result["period_labels"] = len(period_updates)
 
     for header_position, header_row in enumerate(header_rows):
         try:
             columns = find_header_columns(values[header_row - 1])
         except ValueError:
             continue
+
+        start_col = min(columns.values())
+        end_col = max(columns.values())
+        standard_header = build_standard_header_slice(
+            columns,
+            start_col,
+            end_col,
+        )
+        current_header = values[header_row - 1][start_col - 1:end_col]
+        cost_per_conversion_header = values[header_row - 1][
+            columns["cost_per_conversion"] - 1
+        ]
+        requires_metric_migration = is_legacy_conversion_value_header(
+            cost_per_conversion_header
+        )
+        if current_header != standard_header:
+            queue_values_update(
+                worksheet,
+                (
+                    f"{gspread.utils.rowcol_to_a1(header_row, start_col)}:"
+                    f"{gspread.utils.rowcol_to_a1(header_row, end_col)}"
+                ),
+                [standard_header],
+                mutation_batch,
+            )
 
         next_header_row = (
             header_rows[header_position + 1]
@@ -3305,34 +3676,39 @@ def normalize_existing_standard_block_formats(
             next_header_row,
             next_period_row or len(values) + 1,
         ) - 1
-        campaign_col = columns["campaign_name"]
-        status_col = columns["campaign_status"]
-        campaign_rows = []
         data_start_row = header_row + 1
-
-        for row_index in range(data_start_row, block_stop_row + 1):
-            row = values[row_index - 1]
-            campaign_name = (
-                row[campaign_col - 1]
-                if len(row) >= campaign_col
-                else ""
-            )
-            if not str(campaign_name).strip():
-                break
-            if any(is_total_cost_cell(value) for value in row):
-                break
-
-            campaign_status = (
-                row[status_col - 1]
-                if len(row) >= status_col
-                else ""
-            )
-            campaign_rows.append({
-                "campaign_status": campaign_status,
-            })
+        campaign_rows = extract_campaign_rows_from_block(
+            values,
+            columns,
+            data_start_row,
+            block_stop_row,
+        )
 
         if not campaign_rows:
             continue
+
+        ordered_rows = sort_campaign_rows(campaign_rows)
+        order_changed = [row["campaign_id"] for row in ordered_rows] != [
+            row["campaign_id"] for row in campaign_rows
+        ]
+        if order_changed or requires_metric_migration:
+            queue_values_update(
+                worksheet,
+                (
+                    f"{gspread.utils.rowcol_to_a1(data_start_row, start_col)}:"
+                    f"{gspread.utils.rowcol_to_a1(data_start_row + len(ordered_rows) - 1, end_col)}"
+                ),
+                build_output_matrix(
+                    ordered_rows,
+                    columns,
+                    start_col,
+                    end_col,
+                ),
+                mutation_batch,
+            )
+            if order_changed:
+                result["sorted_blocks"] += 1
+        campaign_rows = ordered_rows
 
         data_end_row = data_start_row + len(campaign_rows) - 1
         apply_campaign_value_formats(
@@ -3359,12 +3735,39 @@ def normalize_existing_standard_block_formats(
         except ValueError:
             continue
 
-        apply_total_value_formats(
-            worksheet,
-            columns,
-            total_row,
-            mutation_batch,
+        total_values = values[total_row - 1]
+        is_legacy_totals_row = any(
+            normalize_text(value) == "totales"
+            for value in total_values[start_col - 1:end_col]
         )
+        if is_legacy_totals_row:
+            apply_total_value_formats(
+                worksheet,
+                columns,
+                total_row,
+                mutation_batch,
+                metric_values={
+                    key: (
+                        total_values[col_index - 1]
+                        if len(total_values) >= col_index
+                        else 0
+                    )
+                    for key, col_index in columns.items()
+                    if key not in {"campaign_name", "campaign_status"}
+                },
+            )
+        else:
+            update_total_formulas(
+                worksheet,
+                columns,
+                start_col,
+                end_col,
+                data_start_row,
+                len(campaign_rows),
+                total_row,
+                mutation_batch,
+                metric_totals=summarize_campaign_metrics(campaign_rows),
+            )
         result["totals"] += 1
 
     return result
@@ -3375,7 +3778,7 @@ def normalize_enabled_conditional_format_colors(
     selected_worksheets,
     mutation_batch=None,
 ):
-    """Cambia a verde suave solo reglas condicionales de texto `enabled`."""
+    """Unifica en verde vivo las reglas condicionales de texto `enabled`."""
     selected_sheet_ids = {worksheet.id for worksheet in selected_worksheets}
     metadata = spreadsheet.fetch_sheet_metadata(params={
         "includeGridData": "false",
@@ -3672,18 +4075,18 @@ def apply_campaign_value_formats(
         return
 
     status_col = columns["campaign_status"]
-    number_format_by_key = {
-        "clicks": "#,##0",
-        "ctr": OPTIONAL_DECIMAL_FORMAT,
-        "average_cpc": OPTIONAL_DECIMAL_FORMAT,
-        "cost": OPTIONAL_DECIMAL_FORMAT,
-        "conversions": OPTIONAL_DECIMAL_FORMAT,
-        "cost_per_conversion": OPTIONAL_DECIMAL_FORMAT,
-        "impressions": "#,##0",
-        "top_impression_share": OPTIONAL_DECIMAL_FORMAT,
-        "absolute_top_impression_share": OPTIONAL_DECIMAL_FORMAT,
-        "daily_budget": OPTIONAL_DECIMAL_FORMAT,
-    }
+    metric_keys = (
+        "clicks",
+        "ctr",
+        "average_cpc",
+        "cost",
+        "conversions",
+        "cost_per_conversion",
+        "impressions",
+        "top_impression_share",
+        "absolute_top_impression_share",
+        "daily_budget",
+    )
     requests = []
 
     if apply_status_formats:
@@ -3722,31 +4125,51 @@ def apply_campaign_value_formats(
         })
 
     if apply_number_formats and campaign_count > 0:
-        for key, pattern in number_format_by_key.items():
+        for key in metric_keys:
             if key not in columns:
                 continue
 
             col_index = columns[key]
-            requests.append({
-                "repeatCell": {
-                    "range": {
-                        "sheetId": worksheet.id,
-                        "startRowIndex": data_start_row - 1,
-                        "endRowIndex": data_start_row + campaign_count - 1,
-                        "startColumnIndex": col_index - 1,
-                        "endColumnIndex": col_index,
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "numberFormat": {
-                                "type": "NUMBER",
-                                "pattern": pattern,
+            patterns = [
+                (
+                    INTEGER_NUMBER_FORMAT
+                    if key in {"clicks", "impressions"}
+                    else optional_decimal_format_for_value(
+                        campaign.get(key, 0)
+                    )
+                )
+                for campaign in campaign_rows
+            ]
+            run_start = 0
+            for index in range(1, campaign_count + 1):
+                run_ended = (
+                    index == campaign_count
+                    or patterns[index] != patterns[run_start]
+                )
+                if not run_ended:
+                    continue
+
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": data_start_row - 1 + run_start,
+                            "endRowIndex": data_start_row - 1 + index,
+                            "startColumnIndex": col_index - 1,
+                            "endColumnIndex": col_index,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {
+                                    "type": "NUMBER",
+                                    "pattern": patterns[run_start],
+                                }
                             }
-                        }
-                    },
-                    "fields": "userEnteredFormat.numberFormat",
-                }
-            })
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                })
+                run_start = index
 
     if apply_status_formats:
         for index, campaign in enumerate(campaign_rows):
@@ -3807,6 +4230,7 @@ def update_live_block(
     mutation_batch=None,
     force_formats=False,
 ):
+    campaign_rows = sort_campaign_rows(list(campaign_rows))
     values = block["values"]
     columns = block["columns"]
     start_col = min(columns.values())
@@ -3950,6 +4374,11 @@ def update_live_block(
         total_row,
         mutation_batch,
         apply_formats=True,
+        conversion_total=sum(
+            parse_sheet_number(row.get("conversions", 0))
+            for row in campaign_rows
+        ),
+        metric_totals=summarize_campaign_metrics(campaign_rows),
     )
     if structure_changed or force_formats:
         apply_live_block_borders(
@@ -4649,6 +5078,8 @@ def queue_legacy_historical_historical_total(
     campaign_count,
     total_row,
     mutation_batch=None,
+    conversion_total=None,
+    metric_totals=None,
 ):
     """Restaura la fila TOTALES historica propia de la ficha con totales historicos heredados."""
     width = end_col - start_col + 1
@@ -4798,13 +5229,37 @@ def queue_legacy_historical_historical_total(
         },
     ]
 
+    metric_totals = dict(metric_totals or {})
+    if conversion_total is not None:
+        metric_totals.setdefault("conversions", conversion_total)
     number_formats = {
         "clicks": ("NUMBER", "#,##0"),
-        "ctr": ("PERCENT", OPTIONAL_PERCENT_FORMAT),
-        "average_cpc": ("CURRENCY", OPTIONAL_CURRENCY_FORMAT),
-        "cost": ("CURRENCY", OPTIONAL_CURRENCY_FORMAT),
-        "conversions": ("NUMBER", OPTIONAL_DECIMAL_FORMAT),
-        "cost_per_conversion": ("CURRENCY", OPTIONAL_CURRENCY_FORMAT),
+        "ctr": (
+            "PERCENT",
+            optional_percent_format_for_value(metric_totals.get("ctr", 0)),
+        ),
+        "average_cpc": (
+            "CURRENCY",
+            optional_currency_format_for_value(
+                metric_totals.get("average_cpc", 0)
+            ),
+        ),
+        "cost": (
+            "CURRENCY",
+            optional_currency_format_for_value(metric_totals.get("cost", 0)),
+        ),
+        "conversions": (
+            "NUMBER",
+            optional_decimal_format_for_value(
+                metric_totals.get("conversions", 0)
+            ),
+        ),
+        "cost_per_conversion": (
+            "CURRENCY",
+            optional_currency_format_for_value(
+                metric_totals.get("cost_per_conversion", 0)
+            ),
+        ),
         "impressions": ("NUMBER", "#,##0"),
     }
     for key, (format_type, pattern) in number_formats.items():
@@ -4896,17 +5351,12 @@ def normalize_legacy_historical_historical_totals(
         if campaign_count <= 1:
             continue
 
-        total_values = values[total_row - 1]
-        current_label = (
-            total_values[columns["campaign_status"] - 1]
-            if len(total_values) >= columns["campaign_status"]
-            else ""
+        campaign_rows = extract_campaign_rows_from_block(
+            values,
+            columns,
+            data_start_row,
+            data_start_row + campaign_count - 1,
         )
-        if (
-            total_row not in force_total_rows
-            and normalize_text(current_label) == "totales"
-        ):
-            continue
 
         queue_legacy_historical_historical_total(
             worksheet,
@@ -4917,6 +5367,18 @@ def normalize_legacy_historical_historical_totals(
             campaign_count,
             total_row,
             mutation_batch,
+            conversion_total=sum(
+                parse_sheet_number(
+                    values[row_index - 1][columns["conversions"] - 1]
+                    if len(values[row_index - 1]) >= columns["conversions"]
+                    else 0
+                )
+                for row_index in range(
+                    data_start_row,
+                    data_start_row + campaign_count,
+                )
+            ),
+            metric_totals=summarize_campaign_metrics(campaign_rows),
         )
         normalized.append(total_row)
 
@@ -4995,8 +5457,16 @@ def update_configured_account_statuses(
             {},
         ).items()
     }
+    write_individual_statuses = sem_client.get(
+        "write_individual_account_statuses",
+        True,
+    )
 
-    if len(customer_ids) > 1 and not configured_cells:
+    if (
+        len(customer_ids) > 1
+        and write_individual_statuses
+        and not configured_cells
+    ):
         raise ValueError(
             f"La ficha multicuenta {sem_client['nombre']} necesita "
             "account_status_cells."
@@ -5008,6 +5478,10 @@ def update_configured_account_statuses(
         aggregate_status = aggregate_account_operational_status(
             account_statuses,
             customer_ids,
+            require_all_enabled=sem_client.get(
+                "require_all_accounts_enabled",
+                False,
+            ),
         )
         primary_customer_id = customer_ids[0]
         aggregate_cell = configured_cells.get(
@@ -5027,7 +5501,12 @@ def update_configured_account_statuses(
         })
         start_index = 1
 
-    for customer_id in customer_ids[start_index:]:
+    individual_customer_ids = (
+        customer_ids[start_index:]
+        if write_individual_statuses
+        else []
+    )
+    for customer_id in individual_customer_ids:
         status = account_statuses.get(customer_id, "unknown")
         status_config = {
             "account_status_cell": configured_cells.get(
@@ -5046,17 +5525,74 @@ def update_configured_account_statuses(
             "status": status,
             "cell": cell,
         })
+
+    for status_cell in sem_client.get("clear_account_status_cells", []):
+        status_row, status_col = gspread.utils.a1_to_rowcol(status_cell)
+        queue_values_update(
+            worksheet,
+            status_cell,
+            [[""]],
+            mutation_batch,
+        )
+        queue_format_requests(
+            worksheet,
+            [{
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": status_row - 1,
+                        "endRowIndex": status_row,
+                        "startColumnIndex": status_col - 1,
+                        "endColumnIndex": status_col,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {
+                                "red": 1,
+                                "green": 1,
+                                "blue": 1,
+                            },
+                            "textFormat": {
+                                "bold": False,
+                                "foregroundColor": {
+                                    "red": 0,
+                                    "green": 0,
+                                    "blue": 0,
+                                },
+                            },
+                        }
+                    },
+                    "fields": (
+                        "userEnteredFormat.backgroundColor,"
+                        "userEnteredFormat.textFormat.bold,"
+                        "userEnteredFormat.textFormat.foregroundColor"
+                    ),
+                }
+            }],
+            mutation_batch,
+        )
     return updates
 
 
-def aggregate_account_operational_status(account_statuses, customer_ids=None):
-    """Resume varias cuentas dando prioridad a cualquier cuenta operativa."""
+def aggregate_account_operational_status(
+    account_statuses,
+    customer_ids=None,
+    require_all_enabled=False,
+):
+    """Resume varias cuentas con la política operativa configurada."""
     customer_ids = customer_ids or list(account_statuses)
     statuses = [
         account_statuses.get(customer_id, "Unknown")
         for customer_id in customer_ids
     ]
     normalized = [normalize_text(status) for status in statuses]
+
+    if require_all_enabled:
+        if normalized and all(status == "enabled" for status in normalized):
+            return ACCOUNT_STATUS_ENABLED
+        for status, normalized_status in zip(statuses, normalized):
+            if normalized_status != "enabled":
+                return customer_status_display_label(status)
 
     if "enabled" in normalized:
         return ACCOUNT_STATUS_ENABLED
@@ -5390,9 +5926,9 @@ def google_sheets_date_serial(day):
 
 
 def has_monthly_renewal_without_end(values):
-    renewal_key = normalize_text(MONTHLY_RENEWAL_TEXT)
+    renewal_keys = [normalize_text(value) for value in MONTHLY_RENEWAL_TEXTS]
     return any(
-        renewal_key in normalize_text(value)
+        any(renewal_key in normalize_text(value) for renewal_key in renewal_keys)
         for row in values
         for value in row
     )
@@ -5431,28 +5967,26 @@ def plan_monthly_renewal_updates(
         return result
 
     contract_range = find_contract_date_range(values)
-    active_range_target = next(
-        (
-            target
-            for target in period_targets
-            if target["period_context"]["mode"] == "range"
-            and target["period_context"]["start_day"]
-            <= target_day
-            <= target["period_context"]["end_day"]
-        ),
-        None,
-    )
-    uses_custom_ranges = any(
-        target["period_context"]["mode"] == "range"
+    active_targets = [
+        target
         for target in period_targets
+        if target["period_context"]["start_day"]
+        <= target_day
+        <= target["period_context"]["end_day"]
+    ]
+    if len(active_targets) != 1:
+        result["reason"] = "No hay un unico periodo escrito vigente para hoy."
+        return result
+
+    # Una ficha puede cambiar de meses naturales a rangos personalizados en
+    # otro ano. Solo el periodo vigente decide que regla de renovacion usar;
+    # los rangos futuros no deben reclasificar los meses actuales.
+    current_month_target = active_targets[0]
+    uses_custom_ranges = (
+        current_month_target["period_context"]["mode"] == "range"
     )
 
     if uses_custom_ranges:
-        current_month_target = active_range_target
-        if not current_month_target:
-            result["reason"] = "No hay un rango escrito vigente para hoy."
-            return result
-
         range_start = current_month_target["period_context"]["start_day"]
         if (range_start.year, range_start.month) != (
             target_day.year,
@@ -5482,18 +6016,10 @@ def plan_monthly_renewal_updates(
             )
             return result
 
-        current_month_target = next(
-            (
-                target
-                for target in period_targets
-                if (
-                    target["period_context"]["start_day"].year,
-                    target["period_context"]["start_day"].month,
-                ) == (target_day.year, target_day.month)
-            ),
-            None,
-        )
-        if not current_month_target:
+        if (
+            current_month_target["period_context"]["start_day"].year,
+            current_month_target["period_context"]["start_day"].month,
+        ) != (target_day.year, target_day.month):
             result["reason"] = (
                 "No hay un mes escrito que empiece en el mes actual."
             )
@@ -7417,6 +7943,11 @@ def queue_microsoft_annual_table(
         total_row,
         mutation_batch,
         apply_formats=False,
+        conversion_total=sum(
+            parse_sheet_number(row.get("conversions", 0))
+            for row in campaign_rows
+        ),
+        metric_totals=summarize_campaign_metrics(campaign_rows),
     )
 
     requests = [
@@ -7596,6 +8127,7 @@ def queue_microsoft_annual_table(
         columns,
         total_row,
         mutation_batch,
+        metric_values=summarize_campaign_metrics(campaign_rows),
     )
 
     return {
@@ -7803,11 +8335,8 @@ def fetch_prepared_sem_client_data(prepared):
             result["period_rows"].setdefault(period_key, []).extend(
                 microsoft_rows
             )
-            result["period_rows"][period_key].sort(
-                key=lambda item: (
-                    normalize_text(item["campaign_name"]),
-                    item["campaign_id"],
-                )
+            result["period_rows"][period_key] = sort_campaign_rows(
+                result["period_rows"][period_key]
             )
         result["microsoft_ads"] = {
             "account_id": microsoft_account_id,
@@ -7822,14 +8351,18 @@ def fetch_prepared_sem_client_data(prepared):
             "exchange_rate_source": microsoft_result.get(
                 "exchange_rate_source"
             ),
-            "annual_current_rows": microsoft_result["period_rows"].get(
-                MICROSOFT_ANNUAL_PERIOD_KEY,
-                [],
+            "annual_current_rows": sort_campaign_rows(
+                microsoft_result["period_rows"].get(
+                    MICROSOFT_ANNUAL_PERIOD_KEY,
+                    [],
+                )
             ),
             "annual_archive_rows": {
-                year: microsoft_result["period_rows"].get(
-                    f"{MICROSOFT_ANNUAL_ARCHIVE_KEY_PREFIX}{year}",
-                    [],
+                year: sort_campaign_rows(
+                    microsoft_result["period_rows"].get(
+                        f"{MICROSOFT_ANNUAL_ARCHIVE_KEY_PREFIX}{year}",
+                        [],
+                    )
                 )
                 for year in (
                     microsoft_annual.get("archive_years", [])
@@ -8209,6 +8742,14 @@ def process_sem_client(prepared, ads_data, mutation_batch):
         currency_rows = apply_existing_total_currency_formats(
             worksheet,
             mutation_batch,
+            metric_totals_by_row=(
+                {
+                    historical_result["write"]["total_row"]:
+                        summarize_campaign_metrics(closed_campaign_rows)
+                }
+                if historical_result["write"].get("total_row")
+                else {}
+            ),
         )
         print(
             "Unidad EUR aplicada a totales existentes: "
@@ -8384,9 +8925,17 @@ def process_sem_client(prepared, ads_data, mutation_batch):
             f"({previous_result['group_label']} / "
             f"{previous_result['month_label']})"
         )
+    total_metric_overrides = {
+        write_result["total_row"]: summarize_campaign_metrics(campaign_rows),
+    }
+    if previous_target and historical_result["write"].get("total_row"):
+        total_metric_overrides[historical_result["write"]["total_row"]] = (
+            summarize_campaign_metrics(previous_campaign_rows)
+        )
     currency_rows = apply_existing_total_currency_formats(
         worksheet,
         mutation_batch,
+        metric_totals_by_row=total_metric_overrides,
     )
     print(
         "Unidad EUR aplicada a totales existentes: "
@@ -8458,6 +9007,8 @@ def main():
             "blocks": 0,
             "campaigns": 0,
             "totals": 0,
+            "sorted_blocks": 0,
+            "period_labels": 0,
         }
 
         for sem_client in selected_clients:
@@ -8490,7 +9041,13 @@ def main():
             format_batch.mark_client()
             pending_format_names.append(sem_client["worksheet_name"])
             normalized_totals["worksheets"] += 1
-            for key in ("blocks", "campaigns", "totals"):
+            for key in (
+                "blocks",
+                "campaigns",
+                "totals",
+                "sorted_blocks",
+                "period_labels",
+            ):
                 normalized_totals[key] += normalized[key]
 
             # Los historicos largos generan muchas operaciones de formato.
@@ -8538,7 +9095,9 @@ def main():
             f"{normalized_totals['worksheets']} fichas, "
             f"{normalized_totals['blocks']} bloques, "
             f"{normalized_totals['campaigns']} campanas y "
-            f"{normalized_totals['totals']} totales."
+            f"{normalized_totals['totals']} totales; "
+            f"{normalized_totals['sorted_blocks']} bloques reordenados y "
+            f"{normalized_totals['period_labels']} periodos renombrados."
         )
 
     for sem_client in selected_clients:

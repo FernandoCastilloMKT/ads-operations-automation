@@ -54,29 +54,105 @@ function fichasWorksheetMap_() {
   return mapping;
 }
 
-function fichasBuscarColumnaControl_(sheet) {
-  const maxColumns = sheet.getMaxColumns();
-  const controlRow = sheet.getRange(
-    SEM_BUTTON_ROW,
-    1,
-    1,
-    maxColumns
-  );
-  const notes = controlRow.getNotes()[0];
-  const validations = controlRow.getDataValidations()[0];
+function fichasControlLayouts_() {
+  const layouts = RuntimeConfig.optionalJson('SEM_CONTROL_LAYOUTS_JSON', {});
+  if (!layouts || Array.isArray(layouts)) {
+    throw new Error('SEM_CONTROL_LAYOUTS_JSON debe ser un objeto JSON.');
+  }
+  return layouts;
+}
 
-  for (let index = 0; index < maxColumns; index += 1) {
-    const validation = validations[index];
-    if (
-      notes[index] === SEM_CONTROL_MARKER &&
-      validation &&
-      validation.getCriteriaType() ===
-        SpreadsheetApp.DataValidationCriteria.CHECKBOX
-    ) {
-      return index + 1;
+function fichasControlesGestionados_(sheet) {
+  const rowCount = Math.min(10, sheet.getMaxRows());
+  const columnCount = sheet.getMaxColumns();
+  const range = sheet.getRange(1, 1, rowCount, columnCount);
+  const notes = range.getNotes();
+  const validations = range.getDataValidations();
+  const controls = [];
+
+  for (let row = 0; row < rowCount; row += 1) {
+    for (let column = 0; column < columnCount; column += 1) {
+      const validation = validations[row][column];
+      if (
+        notes[row][column] === SEM_CONTROL_MARKER &&
+        validation &&
+        validation.getCriteriaType() ===
+          SpreadsheetApp.DataValidationCriteria.CHECKBOX
+      ) {
+        controls.push({ row: row + 1, column: column + 1 });
+      }
     }
   }
-  return null;
+  return controls;
+}
+
+function fichasDisenoControl_(sheet) {
+  const layouts = fichasControlLayouts_();
+  const configured =
+    layouts[sheet.getName()] ||
+    (fichasWorksheetMap_()[sheet.getName()] ? layouts.__default__ : null);
+  if (configured) {
+    const button = sheet.getRange(configured.buttonCell);
+    const status = sheet.getRange(configured.statusCell);
+    const statusMerge = configured.statusMergeRange
+      ? sheet.getRange(configured.statusMergeRange)
+      : status;
+    if (
+      button.getNumRows() !== 1 ||
+      button.getNumColumns() !== 1 ||
+      status.getNumRows() !== 1 ||
+      status.getNumColumns() !== 1 ||
+      statusMerge.getRow() !== status.getRow() ||
+      statusMerge.getColumn() !== status.getColumn() ||
+      statusMerge.getNumRows() !== 1
+    ) {
+      throw new Error(
+        `${sheet.getName()}: el control personalizado no es valido.`
+      );
+    }
+    return {
+      buttonRow: button.getRow(),
+      buttonColumn: button.getColumn(),
+      statusRow: status.getRow(),
+      statusColumn: status.getColumn(),
+      statusMergeRange: configured.statusMergeRange || '',
+      formatRange: configured.formatRange || '',
+      templateSheet: configured.templateSheet || '',
+      compact: true,
+    };
+  }
+
+  const existing = fichasControlesGestionados_(sheet)[0];
+  const buttonRow = existing ? existing.row : SEM_BUTTON_ROW;
+  const buttonColumn = existing ? existing.column : SEM_BUTTON_COLUMN;
+  const compact = buttonRow !== SEM_BUTTON_ROW;
+  return {
+    buttonRow: buttonRow,
+    buttonColumn: buttonColumn,
+    statusRow: compact ? buttonRow : SEM_STATUS_ROW,
+    statusColumn: buttonColumn + 1,
+    compact: compact,
+  };
+}
+
+function fichasBuscarControl_(sheet) {
+  const layout = fichasDisenoControl_(sheet);
+  const button = sheet.getRange(layout.buttonRow, layout.buttonColumn);
+  const validation = button.getDataValidation();
+  if (
+    button.getNote() !== SEM_CONTROL_MARKER ||
+    !validation ||
+    validation.getCriteriaType() !==
+      SpreadsheetApp.DataValidationCriteria.CHECKBOX
+  ) {
+    return null;
+  }
+  return layout;
+}
+
+function fichasBuscarColumnaControl_(sheet) {
+  const control = fichasBuscarControl_(sheet);
+  return control ? control.buttonColumn : null;
 }
 
 function fichasEsEstadoGestionado_(value) {
@@ -470,7 +546,7 @@ function fichasFinalizarPendiente_(
       spreadsheet,
       pending.sheetName,
       `Actualizado ${finishedLabel}`,
-      '#34a853',
+      '#000000',
       runUrl
     );
     spreadsheet.toast(
@@ -579,34 +655,29 @@ function fichasActualizarEstado_(
   if (!sheet) {
     return;
   }
-  const controlColumn =
-    fichasBuscarColumnaControl_(sheet) || SEM_BUTTON_COLUMN;
-  const statusColumn = controlColumn + 1;
-  const status = sheet.getRange(SEM_STATUS_ROW, statusColumn);
+  const layout = fichasDisenoControl_(sheet);
+  const status = sheet.getRange(layout.statusRow, layout.statusColumn);
+  const completed = /^Actualizado\b/i.test(String(message || '').trim());
   status
     .setValue(message)
     .setNote(runUrl ? `Ejecucion: ${runUrl}` : '')
-    .setFontColor(color)
-    .setFontWeight('bold')
+    .setFontColor(completed ? '#000000' : color)
+    .setFontWeight(completed ? 'normal' : 'bold')
     .setFontSize(8)
     .setHorizontalAlignment('left')
     .setVerticalAlignment('middle');
 
-  // Si el control se ha movido manualmente, elimina solo los estados antiguos
-  // gestionados por este script para que no aparezcan dos mensajes distintos.
-  const rowValues = sheet
-    .getRange(SEM_STATUS_ROW, 1, 1, sheet.getMaxColumns())
-    .getDisplayValues()[0];
-  rowValues.forEach((value, index) => {
-    const column = index + 1;
-    if (column !== statusColumn && fichasEsEstadoGestionado_(value)) {
-      sheet
-        .getRange(SEM_STATUS_ROW, column)
-        .clearContent()
-        .clearNote()
-        .setFontWeight('normal');
+  // Limpia exclusivamente la posicion predeterminada anterior. No recorre
+  // toda la fila porque algunas fichas contienen datos operativos en ella.
+  if (
+    layout.statusRow !== SEM_STATUS_ROW ||
+    layout.statusColumn !== SEM_STATUS_COLUMN
+  ) {
+    const legacyStatus = sheet.getRange(SEM_STATUS_ROW, SEM_STATUS_COLUMN);
+    if (fichasEsEstadoGestionado_(legacyStatus.getDisplayValue())) {
+      legacyStatus.clearContent().clearNote().setFontWeight('normal');
     }
-  });
+  }
 }
 
 function fichasNotificarDespacho_(message, mostrarToast) {
@@ -676,15 +747,136 @@ function FICHAS_90_repararBotones() {
   spreadsheet.toast(message, 'Controles FICHAS_SEM_CONTROL', 8);
 }
 
+function FICHAS_92_repararControlesPersonalizados() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const layouts = fichasControlLayouts_();
+  const explicitSheetNames = Object.keys(layouts).filter(
+    (sheetName) => sheetName !== '__default__'
+  );
+  const sheetNames = layouts.__default__
+    ? Array.from(
+        new Set([...Object.keys(fichasWorksheetMap_()), ...explicitSheetNames])
+      )
+    : explicitSheetNames;
+  if (!sheetNames.length) {
+    throw new Error('No hay controles personalizados configurados.');
+  }
+
+  const sheets = sheetNames.map((sheetName) => {
+    const sheet = spreadsheet.getSheetByName(sheetName);
+    if (!sheet) {
+      throw new Error(`No se encontro la pestana ${sheetName}.`);
+    }
+    return sheet;
+  });
+
+  // Valida todas las fichas antes de modificar la primera. Asi, una celda
+  // ocupada detiene la migracion completa sin dejarla a medias.
+  sheets.forEach((sheet) => {
+    fichasValidarDisenoCompacto_(sheet, fichasDisenoControl_(sheet));
+  });
+
+  sheets.forEach((sheet) => {
+    sheet.getDrawings().forEach((drawing) => {
+      if (fichasLegacyButtonHandlers_().includes(drawing.getOnAction())) {
+        drawing.remove();
+      }
+    });
+    fichasRepararBotonEnHoja_(sheet, 'Actualizar ficha SEM');
+  });
+
+  Logger.log(
+    `FICHAS: ${sheetNames.length} controles personalizados reparados.`
+  );
+}
+
+function fichasValidarDisenoCompacto_(sheet, layout) {
+  if (!layout.compact || !layout.formatRange) {
+    return;
+  }
+
+  const formatRange = sheet.getRange(layout.formatRange);
+  const displayValues = formatRange.getDisplayValues();
+  const formulas = formatRange.getFormulas();
+  for (let row = 0; row < formatRange.getNumRows(); row += 1) {
+    for (let column = 0; column < formatRange.getNumColumns(); column += 1) {
+      const absoluteRow = formatRange.getRow() + row;
+      const absoluteColumn = formatRange.getColumn() + column;
+      const isButton =
+        absoluteRow === layout.buttonRow &&
+        absoluteColumn === layout.buttonColumn;
+      const isStatus =
+        absoluteRow === layout.statusRow &&
+        absoluteColumn === layout.statusColumn;
+      const value = displayValues[row][column];
+      if (
+        formulas[row][column] ||
+        (value && !isButton && !(isStatus && fichasEsEstadoGestionado_(value)))
+      ) {
+        throw new Error(
+          `${sheet.getName()}: ${layout.formatRange} contiene datos y no se ` +
+            'puede convertir en control manual.'
+        );
+      }
+    }
+  }
+}
+
+function fichasAplicarDisenoCompacto_(sheet, layout) {
+  if (!layout.compact || !layout.formatRange) {
+    return;
+  }
+  fichasValidarDisenoCompacto_(sheet, layout);
+
+  const formatRange = sheet.getRange(layout.formatRange);
+
+  if (layout.templateSheet) {
+    const templateSheet = sheet.getParent().getSheetByName(layout.templateSheet);
+    if (!templateSheet) {
+      throw new Error(
+        `${sheet.getName()}: no existe la plantilla ${layout.templateSheet}.`
+      );
+    }
+    const templateRange = templateSheet.getRange(layout.formatRange);
+    if (
+      templateRange.getNumRows() !== formatRange.getNumRows() ||
+      templateRange.getNumColumns() !== formatRange.getNumColumns()
+    ) {
+      throw new Error(`${sheet.getName()}: el rango de formato no coincide.`);
+    }
+    if (templateSheet.getSheetId() !== sheet.getSheetId()) {
+      templateRange.copyTo(
+        formatRange,
+        SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+        false
+      );
+    }
+  }
+
+  if (layout.statusMergeRange) {
+    const statusMerge = sheet.getRange(layout.statusMergeRange);
+    statusMerge.breakApart();
+    statusMerge.merge();
+  }
+}
+
 function fichasRepararBotonEnHoja_(sheet, label) {
-  const existingControlColumn = fichasBuscarColumnaControl_(sheet);
-  const controlColumn = existingControlColumn || SEM_BUTTON_COLUMN;
-  const statusColumn = controlColumn + 1;
-  const requiredColumn = Math.max(statusColumn, SEM_STATUS_COLUMN);
+  const layout = fichasDisenoControl_(sheet);
+  const requiredColumn = Math.max(
+    layout.buttonColumn,
+    layout.statusColumn,
+    SEM_STATUS_COLUMN
+  );
   if (sheet.getMaxColumns() < requiredColumn) {
     sheet.insertColumnsAfter(
       sheet.getMaxColumns(),
       requiredColumn - sheet.getMaxColumns()
+    );
+  }
+  if (sheet.getMaxRows() < Math.max(layout.buttonRow, layout.statusRow)) {
+    sheet.insertRowsAfter(
+      sheet.getMaxRows(),
+      Math.max(layout.buttonRow, layout.statusRow) - sheet.getMaxRows()
     );
   }
 
@@ -692,71 +884,100 @@ function fichasRepararBotonEnHoja_(sheet, label) {
     .filter((image) => image.getAltTextTitle() === SEM_BUTTON_MARKER)
     .forEach((image) => image.remove());
 
-  const legacyCheckbox = sheet.getRange(SEM_BUTTON_ROW, 17);
-  if (legacyCheckbox.getNote() === SEM_CONTROL_MARKER) {
-    legacyCheckbox
+  const migratedStatuses = [];
+  fichasControlesGestionados_(sheet).forEach((control) => {
+    if (
+      control.row === layout.buttonRow &&
+      control.column === layout.buttonColumn
+    ) {
+      return;
+    }
+
+    const oldCompact = control.row !== SEM_BUTTON_ROW;
+    const oldStatusRow = oldCompact ? control.row : SEM_STATUS_ROW;
+    const oldStatusColumn = control.column + 1;
+    const oldStatus = sheet.getRange(oldStatusRow, oldStatusColumn);
+    if (fichasEsEstadoGestionado_(oldStatus.getDisplayValue())) {
+      migratedStatuses.push({
+        value: oldStatus.getValue(),
+        note: oldStatus.getNote(),
+        color: oldStatus.getFontColor(),
+      });
+      oldStatus.clearContent().clearNote().setFontWeight('normal');
+    }
+
+    sheet
+      .getRange(control.row, control.column)
       .removeCheckboxes()
       .clearContent()
       .clearNote()
       .setBackground(null)
       .setBorder(false, false, false, false, false, false);
-  }
-  const legacyStatus = sheet.getRange(SEM_STATUS_ROW, 18);
-  if (
-    /^(Listo|Actualizacion|Actualizado|Error|Sin confirmacion)/.test(
-      String(legacyStatus.getValue() || '')
-    )
-  ) {
-    legacyStatus.clearContent().clearNote().setFontWeight('normal');
-  }
 
-  const checkbox = sheet.getRange(SEM_BUTTON_ROW, controlColumn);
+    if (!oldCompact) {
+      sheet
+        .getRange(control.row, control.column + 1)
+        .clearContent()
+        .clearNote()
+        .setBackground(null)
+        .setBorder(false, false, false, false, false, false);
+    }
+  });
+
+  fichasAplicarDisenoCompacto_(sheet, layout);
+
+  const checkbox = sheet.getRange(layout.buttonRow, layout.buttonColumn);
   checkbox
     .insertCheckboxes()
     .setValue(false)
     .setNote(SEM_CONTROL_MARKER)
-    .setBackground('#1a73e8')
     .setHorizontalAlignment('center')
-    .setVerticalAlignment('middle')
-    .setBorder(
-      true,
-      true,
-      true,
-      false,
-      false,
-      false,
-      '#1557b0',
-      SpreadsheetApp.BorderStyle.SOLID_MEDIUM
-    );
+    .setVerticalAlignment('middle');
 
-  sheet
-    .getRange(SEM_BUTTON_ROW, controlColumn + 1)
-    .setValue(label)
-    .setNote('Marca la casilla azul para iniciar la actualizacion.')
-    .setBackground('#1a73e8')
-    .setFontColor('#ffffff')
-    .setFontWeight('bold')
-    .setFontSize(9)
-    .setHorizontalAlignment('center')
-    .setVerticalAlignment('middle')
-    .setBorder(
-      true,
-      false,
-      true,
-      true,
-      false,
-      false,
-      '#1557b0',
-      SpreadsheetApp.BorderStyle.SOLID_MEDIUM
-    );
-  sheet.setColumnWidth(controlColumn, 32);
-  sheet.setColumnWidth(controlColumn + 1, 150);
-  sheet.setRowHeight(SEM_BUTTON_ROW, 28);
+  if (!layout.compact) {
+    checkbox
+      .setBackground('#1a73e8')
+      .setBorder(
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        '#1557b0',
+        SpreadsheetApp.BorderStyle.SOLID_MEDIUM
+      );
+    sheet
+      .getRange(layout.buttonRow, layout.buttonColumn + 1)
+      .setValue(label)
+      .setNote('Marca la casilla azul para iniciar la actualizacion.')
+      .setBackground('#1a73e8')
+      .setFontColor('#ffffff')
+      .setFontWeight('bold')
+      .setFontSize(9)
+      .setHorizontalAlignment('center')
+      .setVerticalAlignment('middle')
+      .setBorder(
+        true,
+        false,
+        true,
+        true,
+        false,
+        false,
+        '#1557b0',
+        SpreadsheetApp.BorderStyle.SOLID_MEDIUM
+      );
+    sheet.setColumnWidth(layout.buttonColumn, 32);
+    sheet.setColumnWidth(layout.buttonColumn + 1, 150);
+    sheet.setRowHeight(layout.buttonRow, 28);
+  }
 
-  const status = sheet.getRange(SEM_STATUS_ROW, statusColumn);
+  const status = sheet.getRange(layout.statusRow, layout.statusColumn);
   const fixedStatus = sheet.getRange(SEM_STATUS_ROW, SEM_STATUS_COLUMN);
   if (
-    statusColumn !== SEM_STATUS_COLUMN &&
+    (layout.statusRow !== SEM_STATUS_ROW ||
+      layout.statusColumn !== SEM_STATUS_COLUMN) &&
+    !String(status.getValue() || '').trim() &&
     fichasEsEstadoGestionado_(fixedStatus.getDisplayValue())
   ) {
     status
@@ -772,6 +993,16 @@ function fichasRepararBotonEnHoja_(sheet, label) {
       .clearNote()
       .setFontWeight('normal');
   }
+  if (
+    !String(status.getValue() || '').trim() &&
+    migratedStatuses.length
+  ) {
+    const migrated = migratedStatuses[0];
+    status
+      .setValue(migrated.value)
+      .setNote(migrated.note)
+      .setFontColor(migrated.color);
+  }
   if (!String(status.getValue() || '').trim()) {
     status
       .setValue('Listo para actualizar')
@@ -780,6 +1011,9 @@ function fichasRepararBotonEnHoja_(sheet, label) {
       .setFontSize(8)
       .setHorizontalAlignment('left')
       .setVerticalAlignment('middle');
+  }
+  if (/^Actualizado\b/i.test(status.getDisplayValue())) {
+    status.setFontColor('#000000').setFontWeight('normal');
   }
   return 'instalado';
 }

@@ -52,6 +52,9 @@ Google Sheets con reglas de negocio propias. Con ello se obtiene:
   impresiones, cuotas de impresion y presupuesto diario;
 - mantiene el bloque vivo del periodo actual;
 - archiva periodos anteriores y adapta el numero de filas;
+- presenta periodos como `Mes AAAA` y metricas con hasta dos decimales, sin
+  separadores decimales sueltos;
+- ordena campanas por estado activo y despues por coste descendente;
 - actualiza estados, presupuestos y gasto real;
 - admite varias cuentas publicitarias agregadas en una misma ficha;
 - aplica reglas especiales mediante configuracion, sin incrustar clientes en
@@ -77,6 +80,8 @@ Script como capa de interaccion:
 - bloqueo de dobles clics y ejecuciones repetidas;
 - lanzamiento de workflows mediante `workflow_dispatch`;
 - alertas de saldo generadas desde la propia hoja.
+- avisos anticipados de fecha fin, con ajuste de fin de semana y control de
+  duplicados.
 
 En produccion, Apps Script se comunica exclusivamente con infraestructura
 privada. Los archivos publicados usan propiedades configurables y no incluyen
@@ -110,7 +115,13 @@ scripts/                   Logica Python generica
 scripts/microsoft_ads/     Proveedor aislado de Microsoft Advertising
 tests/                     Contratos de la version publica
 config_*.example.json      Configuraciones completamente ficticias
+public/                    Documentacion seleccionada para crear este escaparate
 ```
+
+El paquete publico se genera con `scripts/build_public_repository.py` desde
+una lista cerrada. Despues, `scripts/audit_public_repository.py` rechaza
+identidades, correos, IDs de cuentas u hojas, credenciales, rutas locales de
+usuario y valores conocidos de la configuracion privada.
 
 ## Ejecutar Las Pruebas
 

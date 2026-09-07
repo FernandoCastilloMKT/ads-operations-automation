@@ -574,3 +574,412 @@ function semSaldoEscapeHtml_(value) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+const SEM_END_DATE_SUBJECT = 'Alerta SEM: campañas próximas a finalizar';
+const SEM_END_DATE_STATE_PROPERTY = 'SEM_END_DATE_ALERTS_V1';
+const SEM_END_DATE_TRIGGER_HANDLER = 'FINSEM_01_revisarYEnviarAlertas';
+const SEM_END_DATE_TIME_ZONE = 'Europe/Madrid';
+const SEM_END_DATE_NOTICE_DAYS = 14;
+const SEM_END_DATE_LOCK_WAIT_MS = 10000;
+const SEM_END_DATE_SCHEDULES = [
+  { hour: 8, minute: 10, label: '08:10' },
+];
+
+/** Envía un único resumen de campañas que llegan a su fecha fin. */
+function FINSEM_01_revisarYEnviarAlertas() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(SEM_END_DATE_LOCK_WAIT_MS)) {
+    Logger.log('Alertas fecha fin SEM: otra ejecución sigue activa.');
+    return;
+  }
+
+  try {
+    const result = semFechaFinCollectAlerts_();
+    const previousState = semFechaFinReadState_();
+    const activeKeys = new Set(result.activeKeys);
+    const nextState = {};
+
+    Object.keys(previousState).forEach((key) => {
+      if (activeKeys.has(key)) {
+        nextState[key] = previousState[key];
+      }
+    });
+
+    const pendingAlerts = result.alerts.filter(
+      (alert) => !previousState[alert.alertKey]
+    );
+    Logger.log(
+      `Alertas fecha fin SEM: ${result.sheetsRead} fichas leídas, ` +
+        `${result.renewalSheets} renovaciones excluidas, ` +
+        `${result.alerts.length} avisos vigentes y ` +
+        `${pendingAlerts.length} avisos nuevos.`
+    );
+
+    if (!pendingAlerts.length) {
+      semFechaFinWriteState_(nextState);
+      Logger.log('Alertas fecha fin SEM: no hay avisos nuevos.');
+      return;
+    }
+
+    const email = semFechaFinBuildEmail_(pendingAlerts, result.checkedAt);
+    MailApp.sendEmail({
+      to: RuntimeConfig.list('SEM_END_DATE_RECIPIENTS').join(','),
+      subject: SEM_END_DATE_SUBJECT,
+      body: email.plainBody,
+      htmlBody: email.htmlBody,
+      name: 'Alertas SEM',
+    });
+
+    const notifiedAt = new Date().toISOString();
+    pendingAlerts.forEach((alert) => {
+      nextState[alert.alertKey] = {
+        worksheet: alert.worksheet,
+        endDate: alert.endDateKey,
+        notifiedAt: notifiedAt,
+      };
+    });
+    semFechaFinWriteState_(nextState);
+    Logger.log(
+      `Alertas fecha fin SEM: email enviado a ` +
+        `${RuntimeConfig.list('SEM_END_DATE_RECIPIENTS').join(', ')} ` +
+        `con ${pendingAlerts.length} avisos.`
+    );
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Construye la revisión y la deja en el registro sin enviar ni marcar. */
+function FINSEM_90_previsualizarSinEnviar() {
+  const result = semFechaFinCollectAlerts_();
+  const previousState = semFechaFinReadState_();
+  const pendingAlerts = result.alerts.filter(
+    (alert) => !previousState[alert.alertKey]
+  );
+  const email = semFechaFinBuildEmail_(result.alerts, result.checkedAt);
+
+  Logger.log(
+    `PRUEBA fecha fin SEM: ${result.sheetsRead} fichas leídas, ` +
+      `${result.renewalSheets} renovaciones excluidas, ` +
+      `${result.alerts.length} avisos vigentes y ` +
+      `${pendingAlerts.length} pendientes.`
+  );
+  Logger.log(email.plainBody);
+}
+
+/** Comprueba sin correo la regla de fin de semana usada por el aviso. */
+function FINSEM_92_probarCalculoFechas() {
+  const friday = semFechaFinNoticeDate_(new Date(2026, 8, 19, 12));
+  const thursday = semFechaFinNoticeDate_(new Date(2026, 8, 18, 12));
+  if (
+    semFechaFinDateKey_(friday) !== '2026-09-04' ||
+    semFechaFinDateKey_(thursday) !== '2026-09-04'
+  ) {
+    throw new Error('La corrección a día laborable no es válida.');
+  }
+  Logger.log('Alertas fecha fin SEM: cálculo de fechas correcto.');
+}
+
+/** Instala un único activador diario para el aviso de fecha fin. */
+function FINSEM_98_instalarActivador() {
+  ScriptApp.getProjectTriggers().forEach((trigger) => {
+    if (trigger.getHandlerFunction() === SEM_END_DATE_TRIGGER_HANDLER) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  SEM_END_DATE_SCHEDULES.forEach((schedule) => {
+    ScriptApp.newTrigger(SEM_END_DATE_TRIGGER_HANDLER)
+      .timeBased()
+      .atHour(schedule.hour)
+      .nearMinute(schedule.minute)
+      .everyDays(1)
+      .inTimezone(SEM_END_DATE_TIME_ZONE)
+      .create();
+  });
+  Logger.log(
+    `Alertas fecha fin SEM: activador instalado para ` +
+      `${SEM_END_DATE_SCHEDULES.map((item) => item.label).join(' y ')}, ` +
+      `zona ${SEM_END_DATE_TIME_ZONE}.`
+  );
+}
+
+/** Verifica que no haya activadores duplicados. */
+function FINSEM_99_auditarActivador() {
+  const triggers = ScriptApp.getProjectTriggers().filter(
+    (trigger) =>
+      trigger.getHandlerFunction() === SEM_END_DATE_TRIGGER_HANDLER &&
+      trigger.getEventType() === ScriptApp.EventType.CLOCK
+  );
+  if (triggers.length !== SEM_END_DATE_SCHEDULES.length) {
+    throw new Error(
+      `Se esperaba ${SEM_END_DATE_SCHEDULES.length} activador de fecha fin ` +
+        `y se encontraron ${triggers.length}.`
+    );
+  }
+  Logger.log('Alertas fecha fin SEM: activador diario correcto.');
+}
+
+function semFechaFinCollectAlerts_() {
+  const spreadsheet = SpreadsheetApp.openById(
+    RuntimeConfig.required('CONTROL_SEM_SPREADSHEET_ID')
+  );
+  const worksheetNames = Object.keys(fichasWorksheetMap_()).sort();
+  const checkedAt = new Date();
+  const today = semFechaFinDateOnly_(checkedAt);
+  const alerts = [];
+  const activeKeys = [];
+  let renewalSheets = 0;
+  let sheetsRead = 0;
+
+  worksheetNames.forEach((worksheetName) => {
+    const worksheet = spreadsheet.getSheetByName(worksheetName);
+    if (!worksheet) {
+      Logger.log(`Alertas fecha fin SEM: no existe ${worksheetName}.`);
+      return;
+    }
+
+    sheetsRead += 1;
+    const rowCount = Math.min(15, worksheet.getMaxRows());
+    const columnCount = Math.min(15, worksheet.getMaxColumns());
+    const range = worksheet.getRange(1, 1, rowCount, columnCount);
+    const values = range.getValues();
+    const displayValues = range.getDisplayValues();
+
+    if (semFechaFinIsMonthlyRenewal_(displayValues)) {
+      renewalSheets += 1;
+      return;
+    }
+
+    const contractEnd = semFechaFinFindContractEnd_(values, displayValues);
+    if (!contractEnd) {
+      Logger.log(
+        `Alertas fecha fin SEM: ${worksheetName} no tiene una Fecha Fin válida.`
+      );
+      return;
+    }
+
+    const endDateKey = semFechaFinDateKey_(contractEnd);
+    const alertKey = `${semSaldoNormalizeHeader_(worksheetName)}|${endDateKey}`;
+    if (contractEnd >= today) {
+      activeKeys.push(alertKey);
+    }
+
+    const noticeDate = semFechaFinNoticeDate_(contractEnd);
+    if (today < noticeDate || today > contractEnd) {
+      return;
+    }
+
+    alerts.push({
+      alertKey: alertKey,
+      worksheet: worksheetName,
+      endDate: semFechaFinDisplayDate_(contractEnd),
+      endDateKey: endDateKey,
+      noticeDate: semFechaFinDisplayDate_(noticeDate),
+      daysRemaining: semFechaFinDaysBetween_(today, contractEnd),
+    });
+  });
+
+  alerts.sort((left, right) =>
+    left.endDateKey.localeCompare(right.endDateKey) ||
+    left.worksheet.localeCompare(right.worksheet, 'es')
+  );
+  return {
+    alerts: alerts,
+    activeKeys: activeKeys,
+    checkedAt: checkedAt,
+    renewalSheets: renewalSheets,
+    sheetsRead: sheetsRead,
+  };
+}
+
+function semFechaFinIsMonthlyRenewal_(displayValues) {
+  return displayValues.some((row) =>
+    row.some((value) =>
+      semSaldoNormalizeHeader_(value).includes('renueva mes a mes')
+    )
+  );
+}
+
+function semFechaFinFindContractEnd_(values, displayValues) {
+  for (let row = 0; row < displayValues.length - 1; row += 1) {
+    for (let column = 0; column < displayValues[row].length; column += 1) {
+      if (semSaldoNormalizeHeader_(displayValues[row][column]) !== 'fecha fin') {
+        continue;
+      }
+      return semFechaFinParseDate_(
+        values[row + 1][column],
+        displayValues[row + 1][column]
+      );
+    }
+  }
+  return null;
+}
+
+function semFechaFinParseDate_(rawValue, displayValue) {
+  if (
+    Object.prototype.toString.call(rawValue) === '[object Date]' &&
+    !Number.isNaN(rawValue.getTime())
+  ) {
+    return semFechaFinDateOnly_(rawValue);
+  }
+
+  const normalized = semSaldoNormalizeHeader_(displayValue || rawValue);
+  const monthNumbers = {
+    enero: 1,
+    ene: 1,
+    febrero: 2,
+    feb: 2,
+    marzo: 3,
+    mar: 3,
+    abril: 4,
+    abr: 4,
+    mayo: 5,
+    may: 5,
+    junio: 6,
+    jun: 6,
+    julio: 7,
+    jul: 7,
+    agosto: 8,
+    ago: 8,
+    septiembre: 9,
+    sept: 9,
+    sep: 9,
+    octubre: 10,
+    oct: 10,
+    noviembre: 11,
+    nov: 11,
+    diciembre: 12,
+    dic: 12,
+  };
+  const match = normalized.match(
+    /^(\d{1,2})\s+([a-z]+|\d{1,2})\s+(\d{4})$/
+  );
+  if (!match) {
+    return null;
+  }
+  const month = /^\d+$/.test(match[2])
+    ? Number(match[2])
+    : monthNumbers[match[2]];
+  if (!month) {
+    return null;
+  }
+  const parsed = new Date(Number(match[3]), month - 1, Number(match[1]), 12);
+  if (
+    parsed.getFullYear() !== Number(match[3]) ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== Number(match[1])
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+function semFechaFinNoticeDate_(endDate) {
+  const noticeDate = new Date(
+    endDate.getFullYear(),
+    endDate.getMonth(),
+    endDate.getDate() - SEM_END_DATE_NOTICE_DAYS,
+    12
+  );
+  if (noticeDate.getDay() === 6) {
+    noticeDate.setDate(noticeDate.getDate() - 1);
+  } else if (noticeDate.getDay() === 0) {
+    noticeDate.setDate(noticeDate.getDate() - 2);
+  }
+  return noticeDate;
+}
+
+function semFechaFinDateOnly_(value) {
+  const key = Utilities.formatDate(
+    value,
+    SEM_END_DATE_TIME_ZONE,
+    'yyyy-MM-dd'
+  );
+  const parts = key.split('-').map(Number);
+  return new Date(parts[0], parts[1] - 1, parts[2], 12);
+}
+
+function semFechaFinDateKey_(value) {
+  return Utilities.formatDate(value, SEM_END_DATE_TIME_ZONE, 'yyyy-MM-dd');
+}
+
+function semFechaFinDisplayDate_(value) {
+  return Utilities.formatDate(value, SEM_END_DATE_TIME_ZONE, 'dd/MM/yyyy');
+}
+
+function semFechaFinDaysBetween_(startDate, endDate) {
+  return Math.round((endDate.getTime() - startDate.getTime()) / 86400000);
+}
+
+function semFechaFinReadState_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(
+    SEM_END_DATE_STATE_PROPERTY
+  );
+  if (!raw) {
+    return {};
+  }
+  try {
+    const state = JSON.parse(raw);
+    return state && typeof state === 'object' ? state : {};
+  } catch (error) {
+    Logger.log(`Alertas fecha fin SEM: estado inválido; se reinicia (${error}).`);
+    return {};
+  }
+}
+
+function semFechaFinWriteState_(state) {
+  PropertiesService.getScriptProperties().setProperty(
+    SEM_END_DATE_STATE_PROPERTY,
+    JSON.stringify(state)
+  );
+}
+
+function semFechaFinBuildEmail_(alerts, checkedAt) {
+  const timestamp = Utilities.formatDate(
+    checkedAt,
+    SEM_END_DATE_TIME_ZONE,
+    'dd/MM/yyyy HH:mm'
+  );
+  const rows = alerts.map((alert) => `
+    <tr>
+      <td style="padding:9px;border:1px solid #d0d7de">${semSaldoEscapeHtml_(alert.worksheet)}</td>
+      <td style="padding:9px;border:1px solid #d0d7de;text-align:center">${alert.endDate}</td>
+      <td style="padding:9px;border:1px solid #d0d7de;text-align:center">${alert.daysRemaining}</td>
+    </tr>`).join('');
+  const htmlBody = `
+    <div style="font-family:Arial,sans-serif;color:#202124;max-width:760px">
+      <h2 style="margin-bottom:6px">Campañas SEM próximas a finalizar</h2>
+      <p style="margin-top:0;color:#5f6368">
+        Revisión automática del ${timestamp} (${SEM_END_DATE_TIME_ZONE}).
+      </p>
+      <p>Estas fichas alcanzarán su fecha fin próximamente:</p>
+      <table style="border-collapse:collapse;width:100%;font-size:13px">
+        <thead>
+          <tr style="background:#1f4e78;color:#fff;text-align:left">
+            <th style="padding:9px;border:1px solid #d0d7de">Cliente</th>
+            <th style="padding:9px;border:1px solid #d0d7de;text-align:center">Fecha fin</th>
+            <th style="padding:9px;border:1px solid #d0d7de;text-align:center">Días restantes</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p style="font-size:12px;color:#5f6368;margin-top:14px">
+        Las renovaciones mes a mes quedan excluidas. El aviso se programa 14 días
+        antes y, si cae en fin de semana, se adelanta al viernes.
+      </p>
+    </div>`;
+  const plainBody = [
+    'Campañas SEM próximas a finalizar',
+    `Revisión automática: ${timestamp} (${SEM_END_DATE_TIME_ZONE}).`,
+    '',
+    'Cliente | Fecha fin | Días restantes',
+    ...alerts.map(
+      (alert) =>
+        `${alert.worksheet} | ${alert.endDate} | ${alert.daysRemaining}`
+    ),
+    '',
+    'Las renovaciones mes a mes quedan excluidas.',
+  ].join('\n');
+  return { htmlBody: htmlBody, plainBody: plainBody };
+}
