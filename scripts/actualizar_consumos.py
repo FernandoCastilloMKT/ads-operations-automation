@@ -497,7 +497,7 @@ def parse_daily_google_ads_sheet_month(sheet_name):
     normalized = normalize_sheet_text(sheet_name)
     match = re.fullmatch(
         (
-            r"consumos"
+            r"(?:consumos)?"
             r"(ene|enero|feb|febrero|mar|marzo|abr|abril|may|mayo|"
             r"jun|junio|jul|julio|ago|agosto|sep|septiembre|"
             r"oct|octubre|nov|noviembre|dic|diciembre)"
@@ -538,6 +538,89 @@ def parse_daily_google_ads_sheet_month(sheet_name):
     raw_year = int(match.group(2))
     year = raw_year if raw_year >= 1000 else 2000 + raw_year
     return date(year, month_aliases[match.group(1)], 1)
+
+
+def plan_hidden_daily_sheet_order(worksheets):
+    ordered = sorted(
+        worksheets,
+        key=lambda worksheet: int(worksheet._properties.get("index", 0)),
+    )
+    hidden_positions = []
+    hidden_daily_sheets = []
+
+    for position, worksheet in enumerate(ordered):
+        sheet_month = parse_daily_google_ads_sheet_month(worksheet.title)
+        if not sheet_month or not worksheet._properties.get("hidden", False):
+            continue
+        hidden_positions.append(position)
+        hidden_daily_sheets.append(worksheet)
+
+    hidden_daily_sheets.sort(
+        key=lambda worksheet: (
+            parse_daily_google_ads_sheet_month(worksheet.title),
+            normalize_sheet_text(worksheet.title),
+        )
+    )
+    desired = list(ordered)
+    for position, worksheet in zip(hidden_positions, hidden_daily_sheets):
+        desired[position] = worksheet
+    return desired
+
+
+def build_sheet_reorder_requests(current, desired):
+    working = list(current)
+    requests = []
+
+    for target_index, worksheet in enumerate(desired):
+        current_index = working.index(worksheet)
+        if current_index == target_index:
+            continue
+        requests.append({
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": worksheet.id,
+                    "index": target_index,
+                },
+                "fields": "index",
+            }
+        })
+        working.pop(current_index)
+        working.insert(target_index, worksheet)
+
+    return requests
+
+
+def maintain_hidden_daily_sheet_order(
+    spreadsheet,
+    target_day=None,
+    force=False,
+):
+    target_day = target_day or date.today()
+    if target_day.day != 1 and not force:
+        return []
+
+    current = sorted(
+        spreadsheet.worksheets(),
+        key=lambda worksheet: int(worksheet._properties.get("index", 0)),
+    )
+    desired = plan_hidden_daily_sheet_order(current)
+    requests = build_sheet_reorder_requests(current, desired)
+
+    if requests:
+        spreadsheet.batch_update({"requests": requests})
+        print(
+            "Pestanas mensuales ocultas ordenadas cronologicamente: "
+            f"{len(requests)} movimientos."
+        )
+    else:
+        print("Orden mensual oculto: ya estaba correcto.")
+
+    return [
+        worksheet.title
+        for worksheet in desired
+        if worksheet._properties.get("hidden", False)
+        and parse_daily_google_ads_sheet_month(worksheet.title)
+    ]
 
 
 def plan_daily_sheet_visibility(worksheets, target_day, visible_months=3):
@@ -1758,6 +1841,42 @@ def build_id_to_row(values, header_row_index, id_col):
     return id_to_row
 
 
+def build_daily_total_title(value, target_day):
+    normalized = normalize_match_text(value)
+    if not normalized.startswith(("googleadstotal", "googletotal")):
+        return None
+
+    raw_value = str(value).strip()
+    total_match = re.search(r"(?i)\btotal\b", raw_value)
+    prefix = (
+        raw_value[:total_match.end()].strip()
+        if total_match
+        else "Google Ads TOTAL"
+    )
+    return f"{prefix} {get_month_abbr(target_day.month)} {target_day.year}"
+
+
+def clear_out_of_month_daily_cells(worksheet, values, target_day):
+    header_row_index, header_row = find_header_row(values)
+    date_columns = get_date_columns(header_row)
+    if not date_columns:
+        return []
+
+    first_date_col = min(date_columns.values())
+    days_in_target_month = monthrange(target_day.year, target_day.month)[1]
+    first_extra_col = first_date_col + days_in_target_month
+    last_calendar_col = min(first_date_col + 30, worksheet.col_count)
+    if first_extra_col > last_calendar_col:
+        return []
+
+    last_used_row = max(len(values), header_row_index)
+    start_cell = gspread.utils.rowcol_to_a1(1, first_extra_col)
+    end_cell = gspread.utils.rowcol_to_a1(last_used_row, last_calendar_col)
+    clear_range = f"{start_cell}:{end_cell}"
+    worksheet.batch_clear([clear_range])
+    return [clear_range]
+
+
 def update_daily_sheet_date_headers(worksheet, source_day, target_day):
     values = worksheet.get_all_values()
     header_row_index, header_row = find_header_row(values)
@@ -1806,14 +1925,12 @@ def update_daily_sheet_date_headers(worksheet, source_day, target_day):
 
     for row_index, row in enumerate(values[:header_row_index - 1], start=1):
         for col_index, value in enumerate(row, start=1):
-            if normalize_match_text(value).startswith("googleadstotal"):
+            updated_title = build_daily_total_title(value, target_day)
+            if updated_title:
                 title_cell = gspread.utils.rowcol_to_a1(row_index, col_index)
                 updates.append({
                     "range": title_cell,
-                    "values": [[
-                        f"Google Ads TOTAL {get_month_abbr(target_day.month)} "
-                        f"{target_day.year}"
-                    ]],
+                    "values": [[updated_title]],
                 })
                 title_updated = True
                 break
@@ -1825,6 +1942,7 @@ def update_daily_sheet_date_headers(worksheet, source_day, target_day):
         updates,
         value_input_option="USER_ENTERED"
     )
+    clear_out_of_month_daily_cells(worksheet, values, target_day)
 
 
 def get_preserved_failed_daily_accounts(
@@ -2930,6 +3048,10 @@ def main():
 
         if today.day == 1:
             maintain_daily_sheet_visibility(
+                spreadsheet,
+                today,
+            )
+            maintain_hidden_daily_sheet_order(
                 spreadsheet,
                 today,
             )
