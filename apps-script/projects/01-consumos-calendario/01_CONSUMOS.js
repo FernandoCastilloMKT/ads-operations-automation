@@ -287,6 +287,8 @@ function consumosFinalizarPendiente_(
   const finishedAt = Number.isNaN(parsedFinishedAt.getTime())
     ? new Date()
     : parsedFinishedAt;
+  let toastMessage = '';
+  let toastTitle = 'Actualizar consumos';
 
   if (conclusion === 'success') {
     const finishedLabel = Utilities.formatDate(
@@ -301,12 +303,10 @@ function consumosFinalizarPendiente_(
       '#34a853',
       runUrl
     );
-    spreadsheet.toast(
+    toastMessage =
       'Actualizacion finalizada correctamente. Todos los datos del ' +
-        'Google Sheet ya estan actualizados.',
-      'Consumos actualizados',
-      10
-    );
+      'Google Sheet ya estan actualizados.';
+    toastTitle = 'Consumos actualizados';
   } else if (conclusion === 'unconfirmed') {
     consumosActualizarEstadoControl_(
       spreadsheet,
@@ -314,11 +314,8 @@ function consumosFinalizarPendiente_(
       'Sin confirmacion de GitHub',
       '#ff0000'
     );
-    spreadsheet.toast(
-      'No se pudo confirmar la finalizacion. Revisa GitHub Actions.',
-      'Actualizar consumos',
-      10
-    );
+    toastMessage =
+      'No se pudo confirmar la finalizacion. Revisa GitHub Actions.';
   } else {
     consumosActualizarEstadoControl_(
       spreadsheet,
@@ -327,14 +324,27 @@ function consumosFinalizarPendiente_(
       '#ff0000',
       runUrl
     );
-    spreadsheet.toast(
-      'La actualizacion termino con error. Revisa GitHub Actions.',
-      'Error al actualizar consumos',
-      10
-    );
+    toastMessage =
+      'La actualizacion termino con error. Revisa GitHub Actions.';
+    toastTitle = 'Error al actualizar consumos';
   }
 
+  // El estado persistente es la fuente de verdad. La notificacion visual no
+  // esta disponible desde todos los contextos de Apps Script (por ejemplo,
+  // Execution API o algunos activadores), por lo que el bloqueo se elimina
+  // antes de intentar mostrarla.
   properties.deleteProperty(pendingKey);
+  consumosToastSeguro_(spreadsheet, toastMessage, toastTitle, 10);
+}
+
+function consumosToastSeguro_(spreadsheet, message, title, seconds) {
+  try {
+    spreadsheet.toast(message, title, seconds);
+  } catch (error) {
+    console.warn(
+      `No se pudo mostrar la notificacion de consumos: ${error.message}`
+    );
+  }
 }
 
 function CONSUMOS_92_instalarControlesManuales() {

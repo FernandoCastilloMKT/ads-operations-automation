@@ -74,7 +74,9 @@ ejecucion actualiza filas existentes en vez de duplicarlas.
 7. Se actualizan estado de cuenta, gasto real y periodo en curso.
 8. En el cambio de periodo se archiva el bloque anterior siguiendo el orden
    cronologico.
-9. Se mantiene la posicion de filas bajo control manual y se aplica formato
+9. Se formatean periodos como `Mes AAAA`, se eliminan separadores decimales
+   sueltos y se ordenan filas por estado activo y coste descendente.
+10. Se mantiene la posicion de filas bajo control manual y se aplica formato
    monetario a costes agregados vivos e historicos.
 
 Las renovaciones mensuales sin fecha fin avanzan normalmente el primer dia
@@ -84,6 +86,12 @@ antes del siguiente dia 1.
 
 Las excepciones se expresan en configuracion. Esto evita que los nombres de
 clientes se conviertan en ramas dispersas dentro del codigo.
+
+Apps Script realiza tambien comprobaciones de solo lectura sobre las hojas.
+Una campana con plazo fijo puede generar un unico resumen catorce dias antes
+de su fecha fin. Si el aviso cae en fin de semana se adelanta al dia laborable
+anterior, las renovaciones mensuales abiertas se excluyen y una clave guardada
+en propiedades evita notificaciones duplicadas.
 
 ## Fiabilidad
 

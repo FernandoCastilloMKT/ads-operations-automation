@@ -75,7 +75,9 @@ process twice updates existing rows instead of creating duplicates.
 6. Write campaign rows and totals in batches.
 7. Update account state, actual spend and the active reporting period.
 8. Archive the previous block in chronological order when the period changes.
-9. Keep row placement under operator control while applying currency formats
+9. Format periods as `Month YYYY`, remove dangling decimal separators and
+   order rows by active status and descending cost.
+10. Keep row placement under operator control while applying currency formats
    to live and historical aggregate costs.
 
 Open-ended monthly renewals normally advance on the first day of the month.
@@ -85,6 +87,11 @@ the current month before the next first day.
 
 Exceptional behavior lives in configuration. This prevents client names from
 becoming scattered conditional branches throughout the source code.
+
+Apps Script also performs read-only spreadsheet checks. A fixed-term campaign
+can produce one summary alert fourteen days before its end date. Weekend
+notice dates move to the previous working day, open-ended monthly renewals are
+excluded, and a property-backed key prevents duplicate notifications.
 
 ## Reliability
 

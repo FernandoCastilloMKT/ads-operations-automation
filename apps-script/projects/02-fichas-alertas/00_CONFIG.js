@@ -67,9 +67,11 @@ function CONFIG_90_aplicarPropiedades(payload) {
     'FICHAS_GITHUB_WORKFLOW',
     'FICHAS_CALLBACK_TOKEN',
     'SEM_WORKSHEET_MAP_JSON',
+    'SEM_CONTROL_LAYOUTS_JSON',
     'SEM_GLOBAL_SHEET',
     'CONTROL_SEM_SPREADSHEET_ID',
     'SEM_SALDO_RECIPIENTS',
+    'SEM_END_DATE_RECIPIENTS',
     'SEM_LEGACY_BUTTON_HANDLERS_JSON',
   ]);
   const values = payload || {};
@@ -91,11 +93,14 @@ function CONFIG_91_auditarPropiedades() {
     'PUBLIC_RUNNER_OWNER',
     'PUBLIC_RUNNER_REPO',
     'SEM_WORKSHEET_MAP_JSON',
+    'SEM_CONTROL_LAYOUTS_JSON',
     'SEM_GLOBAL_SHEET',
     'CONTROL_SEM_SPREADSHEET_ID',
     'SEM_SALDO_RECIPIENTS',
+    'SEM_END_DATE_RECIPIENTS',
   ].forEach((name) => RuntimeConfig.required(name));
   fichasWorksheetMap_();
   RuntimeConfig.list('SEM_SALDO_RECIPIENTS');
+  RuntimeConfig.list('SEM_END_DATE_RECIPIENTS');
   Logger.log('Configuracion privada de fichas/alertas correcta.');
 }

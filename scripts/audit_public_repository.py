@@ -24,6 +24,8 @@ FORBIDDEN_NAMES = {
     ".webapp-deployment.json",
     "config_clientes.json",
     "config_fichas_sem.json",
+    "config_meta_ads_dinamizaciones.json",
+    "config_linkedin_ads_dinamizaciones.json",
     "google-sheets-service-account.json",
     "google-workspace-token.json",
 }
@@ -124,6 +126,38 @@ def collect_private_needles(reference_paths):
                     for value in client.get(key, []):
                         if len(str(value)) >= 4:
                             needles.add(str(value))
+        elif path.name == "config_meta_ads_dinamizaciones.json":
+            spreadsheet_id = str(data.get("spreadsheet_id", "")).strip()
+            if len(spreadsheet_id) >= 4:
+                needles.add(spreadsheet_id)
+            for client in data.get("clients", {}).values():
+                for key in (
+                    "nombre",
+                    "worksheet_name",
+                    "meta_ad_account_id",
+                ):
+                    value = str(client.get(key, "")).strip()
+                    if len(value) >= 4:
+                        needles.add(value)
+                for value in client.get("campaign_name_contains", []):
+                    if len(str(value)) >= 4:
+                        needles.add(str(value))
+        elif path.name == "config_linkedin_ads_dinamizaciones.json":
+            spreadsheet_id = str(data.get("spreadsheet_id", "")).strip()
+            if len(spreadsheet_id) >= 4:
+                needles.add(spreadsheet_id)
+            client = data.get("client", {})
+            for key in (
+                "nombre",
+                "worksheet_name",
+                "linkedin_ad_account_id",
+            ):
+                value = str(client.get(key, "")).strip()
+                if len(value) >= 4:
+                    needles.add(value)
+            for value in client.get("special_campaign_names", []):
+                if len(str(value)) >= 4:
+                    needles.add(str(value))
     return {
         needle
         for needle in needles
