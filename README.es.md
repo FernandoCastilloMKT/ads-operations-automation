@@ -115,13 +115,18 @@ scripts/                   Logica Python generica
 scripts/microsoft_ads/     Proveedor aislado de Microsoft Advertising
 tests/                     Contratos de la version publica
 config_*.example.json      Configuraciones completamente ficticias
-public/                    Documentacion seleccionada para crear este escaparate
+docs/                      Arquitectura y limites de fiabilidad
+AGENTS.md, pytest.ini       Entrada para IA y descubrimiento aislado de pruebas
 ```
 
 El paquete publico se genera con `scripts/build_public_repository.py` desde
 una lista cerrada. Despues, `scripts/audit_public_repository.py` rechaza
 identidades, correos, IDs de cuentas u hojas, credenciales, rutas locales de
 usuario y valores conocidos de la configuracion privada.
+
+Consulta [los límites de fiabilidad](docs/RELIABILITY.md) y
+[la guía para agentes](AGENTS.md). Las renovaciones se guardan junto a su marca
+y un origen diario ausente no sustituye un mes del resumen anual.
 
 ## Ejecutar Las Pruebas
 

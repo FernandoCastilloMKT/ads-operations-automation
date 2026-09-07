@@ -713,6 +713,51 @@ def queue_cell_note(worksheet, cell, note, mutation_batch=None):
     )
 
 
+def queue_monthly_renewal(worksheet, renewal, mutation_batch):
+    """Guarda fecha, presupuesto y nota en la misma peticion atomica.
+
+    Los valores de renovacion nunca van a values_batch_update: una respuesta
+    perdida o un fallo del batch debe conservar fecha y marca juntas.
+    """
+    if not renewal.get("applied"):
+        return
+    note_update = renewal.get("note_update")
+    updates = renewal.get("value_updates", [])
+    if not note_update or not any(
+        update["cell"] == note_update["cell"]
+        and update["kind"] == "contract_end"
+        for update in updates
+    ):
+        raise SaldoPeriodValidationError(
+            "La renovacion debe contener una fecha final y su nota de control."
+        )
+    requests = []
+    for update in updates:
+        row, col = gspread.utils.a1_to_rowcol(update["cell"])
+        value = update["value"]
+        if update["kind"] == "monthly_budget":
+            value = parse_sheet_number(value)
+        cell = {"userEnteredValue": {"numberValue": value}}
+        fields = "userEnteredValue"
+        if update["cell"] == note_update["cell"]:
+            cell["note"] = note_update["note"]
+            fields += ",note"
+        requests.append({
+            "updateCells": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": col - 1,
+                    "endColumnIndex": col,
+                },
+                "rows": [{"values": [cell]}],
+                "fields": fields,
+            }
+        })
+    mutation_batch.add_requests(requests)
+
+
 def today_in_spain():
     return datetime.now(SPAIN_TIMEZONE).date()
 
@@ -8426,21 +8471,7 @@ def process_sem_client(prepared, ads_data, mutation_batch):
         )
 
     monthly_renewal = saldo_targets.get("monthly_renewal", {})
-    for update in monthly_renewal.get("value_updates", []):
-        queue_values_update(
-            worksheet,
-            update["cell"],
-            [[update["value"]]],
-            mutation_batch,
-        )
-    if monthly_renewal.get("note_update"):
-        note_update = monthly_renewal["note_update"]
-        queue_cell_note(
-            worksheet,
-            note_update["cell"],
-            note_update["note"],
-            mutation_batch,
-        )
+    queue_monthly_renewal(worksheet, monthly_renewal, mutation_batch)
     if monthly_renewal.get("applied"):
         copied_budget = next(
             (

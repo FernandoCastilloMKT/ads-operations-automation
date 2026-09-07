@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -21,12 +22,10 @@ from runtime_config import (  # noqa: E402
 
 class PublicConfigurationTests(unittest.TestCase):
     def setUp(self):
-        os.environ["ADS_AUTOMATION_CONSUMPTION_CONFIG_PATH"] = str(
-            ROOT / "config_clientes.example.json"
-        )
-        os.environ["ADS_AUTOMATION_SEM_CONFIG_PATH"] = str(
-            ROOT / "config_fichas_sem.example.json"
-        )
+        self.enterContext(patch.dict(os.environ, {
+            "ADS_AUTOMATION_CONSUMPTION_CONFIG_PATH": str(ROOT / "config_clientes.example.json"),
+            "ADS_AUTOMATION_SEM_CONFIG_PATH": str(ROOT / "config_fichas_sem.example.json"),
+        }))
 
     def test_examples_match_runtime_schema(self):
         self.assertTrue(load_consumption_runtime_config()["clientes"])
