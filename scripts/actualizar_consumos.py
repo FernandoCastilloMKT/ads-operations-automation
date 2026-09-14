@@ -624,19 +624,38 @@ def maintain_hidden_daily_sheet_order(
 
 
 def plan_daily_sheet_visibility(worksheets, target_day, visible_months=3):
+    to_hide, _ = plan_daily_sheet_visibility_changes(
+        worksheets,
+        target_day,
+        visible_months,
+    )
+    return to_hide
+
+
+def plan_daily_sheet_visibility_changes(
+    worksheets,
+    target_day,
+    visible_months=3,
+):
     keep_from = add_months(target_day.replace(day=1), -(visible_months - 1))
     to_hide = []
+    to_show = []
 
     for worksheet in worksheets:
         sheet_month = parse_daily_google_ads_sheet_month(worksheet.title)
 
-        if not sheet_month or sheet_month >= keep_from:
+        if not sheet_month:
             continue
 
-        if not worksheet._properties.get("hidden", False):
-            to_hide.append(worksheet)
+        should_be_visible = keep_from <= sheet_month <= target_day.replace(day=1)
+        is_hidden = worksheet._properties.get("hidden", False)
 
-    return to_hide
+        if not should_be_visible and not is_hidden:
+            to_hide.append(worksheet)
+        elif should_be_visible and is_hidden:
+            to_show.append(worksheet)
+
+    return to_hide, to_show
 
 
 def maintain_daily_sheet_visibility(
@@ -651,14 +670,14 @@ def maintain_daily_sheet_visibility(
         return []
 
     worksheets = spreadsheet.worksheets()
-    to_hide = plan_daily_sheet_visibility(
+    to_hide, to_show = plan_daily_sheet_visibility_changes(
         worksheets,
         target_day,
         visible_months,
     )
 
-    if not to_hide:
-        print("Visibilidad mensual: no hay hojas diarias antiguas que ocultar.")
+    if not to_hide and not to_show:
+        print("Visibilidad mensual: las tres hojas recientes ya estan correctas.")
         return []
 
     spreadsheet.batch_update({
@@ -670,14 +689,27 @@ def maintain_daily_sheet_visibility(
                 },
                 "fields": "hidden",
             }
-        } for worksheet in to_hide]
+        } for worksheet in to_hide] + [{
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": worksheet.id,
+                    "hidden": False,
+                },
+                "fields": "hidden",
+            }
+        } for worksheet in to_show]
     })
 
-    print("Hojas diarias antiguas ocultadas:")
-    for worksheet in to_hide:
-        print(f"  - {worksheet.title}")
+    if to_hide:
+        print("Hojas diarias antiguas ocultadas:")
+        for worksheet in to_hide:
+            print(f"  - {worksheet.title}")
+    if to_show:
+        print("Hojas diarias recientes mostradas:")
+        for worksheet in to_show:
+            print(f"  - {worksheet.title}")
 
-    return [worksheet.title for worksheet in to_hide]
+    return [worksheet.title for worksheet in [*to_hide, *to_show]]
 
 
 def get_month_delta(start_day, end_day):
@@ -1856,6 +1888,45 @@ def build_daily_total_title(value, target_day):
     return f"{prefix} {get_month_abbr(target_day.month)} {target_day.year}"
 
 
+def build_restore_daily_column_requests(
+    worksheet,
+    first_date_col,
+    source_day,
+    target_day,
+):
+    source_days = monthrange(source_day.year, source_day.month)[1]
+    target_days = monthrange(target_day.year, target_day.month)[1]
+    if target_days <= source_days:
+        return []
+
+    requests = []
+    for day_number in range(source_days + 1, target_days + 1):
+        source_day_number = day_number - 7
+        source_col = first_date_col + source_day_number - 1
+        destination_col = first_date_col + day_number - 1
+        requests.append({
+            "copyPaste": {
+                "source": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 0,
+                    "endRowIndex": worksheet.row_count,
+                    "startColumnIndex": source_col - 1,
+                    "endColumnIndex": source_col,
+                },
+                "destination": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 0,
+                    "endRowIndex": worksheet.row_count,
+                    "startColumnIndex": destination_col - 1,
+                    "endColumnIndex": destination_col,
+                },
+                "pasteType": "PASTE_NORMAL",
+                "pasteOrientation": "NORMAL",
+            }
+        })
+    return requests
+
+
 def clear_out_of_month_daily_cells(worksheet, values, target_day):
     header_row_index, header_row = find_header_row(values)
     date_columns = get_date_columns(header_row)
@@ -1865,15 +1936,30 @@ def clear_out_of_month_daily_cells(worksheet, values, target_day):
     first_date_col = min(date_columns.values())
     days_in_target_month = monthrange(target_day.year, target_day.month)[1]
     first_extra_col = first_date_col + days_in_target_month
-    last_calendar_col = min(first_date_col + 30, worksheet.col_count)
-    if first_extra_col > last_calendar_col:
+    last_extra_col = worksheet.col_count
+    if first_extra_col > last_extra_col:
         return []
 
-    last_used_row = max(len(values), header_row_index)
+    last_used_row = worksheet.row_count
     start_cell = gspread.utils.rowcol_to_a1(1, first_extra_col)
-    end_cell = gspread.utils.rowcol_to_a1(last_used_row, last_calendar_col)
+    end_cell = gspread.utils.rowcol_to_a1(last_used_row, last_extra_col)
     clear_range = f"{start_cell}:{end_cell}"
     worksheet.batch_clear([clear_range])
+    worksheet.spreadsheet.batch_update({
+        "requests": [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 0,
+                    "endRowIndex": worksheet.row_count,
+                    "startColumnIndex": first_extra_col - 1,
+                    "endColumnIndex": last_extra_col,
+                },
+                "cell": {},
+                "fields": "userEnteredFormat,note,dataValidation",
+            }
+        }]
+    })
     return [clear_range]
 
 
@@ -1897,6 +1983,15 @@ def update_daily_sheet_date_headers(worksheet, source_day, target_day):
 
     if max_col > worksheet.col_count:
         worksheet.add_cols(max_col - worksheet.col_count)
+
+    column_restore_requests = build_restore_daily_column_requests(
+        worksheet,
+        min_col,
+        source_day,
+        target_day,
+    )
+    if column_restore_requests:
+        worksheet.spreadsheet.batch_update({"requests": column_restore_requests})
 
     updated_header_slice = []
 
