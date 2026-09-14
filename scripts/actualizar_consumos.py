@@ -1888,6 +1888,33 @@ def build_daily_total_title(value, target_day):
     return f"{prefix} {get_month_abbr(target_day.month)} {target_day.year}"
 
 
+def build_daily_summary_formula_updates(
+    header_row_index,
+    first_date_col,
+    days_in_target_month,
+):
+    last_date_col = first_date_col + days_in_target_month - 1
+    first_day_cell = gspread.utils.rowcol_to_a1(1, first_date_col)
+    last_day_cell = gspread.utils.rowcol_to_a1(1, last_date_col)
+    updates = [{
+        "range": "C1",
+        "values": [[f"=SUM({first_day_cell}:{last_day_cell})"]],
+    }]
+
+    first_data_row = header_row_index + 1
+    for col in range(first_date_col, last_date_col + 1):
+        column_label = re.sub(
+            r"\d+",
+            "",
+            gspread.utils.rowcol_to_a1(1, col),
+        )
+        updates.append({
+            "range": f"{column_label}1",
+            "values": [[f"=SUM({column_label}{first_data_row}:{column_label})"]],
+        })
+    return updates
+
+
 def build_restore_daily_column_requests(
     worksheet,
     first_date_col,
@@ -2013,6 +2040,11 @@ def update_daily_sheet_date_headers(worksheet, source_day, target_day):
         "range": f"{start_cell}:{end_cell}",
         "values": [updated_header_slice],
     }]
+    updates.extend(build_daily_summary_formula_updates(
+        header_row_index,
+        min_col,
+        days_in_target_month,
+    ))
 
     # La hoja se copia desde el mes anterior. Actualizamos tambien el titulo
     # decorativo para que no siga mostrando, por ejemplo, "Jun" en julio.
