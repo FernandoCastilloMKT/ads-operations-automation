@@ -3184,16 +3184,14 @@ def repair_missing_historical_totals(
 ):
     """Repara todos los totales historicos omitidos, no solo el mes anterior."""
     repaired = []
+    values = get_worksheet_values(worksheet)
+    missing_blocks = find_missing_historical_total_blocks(values)
 
-    while True:
-        values = get_worksheet_values(worksheet, refresh=bool(repaired))
-        missing_blocks = find_missing_historical_total_blocks(values)
-        if not missing_blocks:
-            break
-
-        # Se procesa de arriba abajo: las inserciones posteriores no desplazan
-        # los rangos de formulas que ya quedaron preparados en filas anteriores.
-        missing = missing_blocks[0]
+    # El batch todavia no es visible en una lectura remota. Procesar una foto
+    # fija evita detectar varias veces el mismo total pendiente. El orden
+    # inverso mantiene validas las filas superiores si un bloque inferior
+    # necesita insertar espacio.
+    for missing in reversed(missing_blocks):
         historical_block = build_compatible_historical_block(
             worksheet,
             values,
@@ -3275,6 +3273,8 @@ def repair_missing_historical_totals(
             "total_row": total_row,
         })
 
+    repaired.reverse()
+
     if repaired:
         values = get_worksheet_values(worksheet, refresh=True)
         marker_row = find_historical_marker_row(values)
@@ -3341,15 +3341,38 @@ def update_total_formulas(worksheet, columns, start_col, end_col, data_start_row
 
     set_sum("impressions")
 
+    # La etiqueta suele ocupar una celda combinada CTR:CPC. La API de Values
+    # interpreta la celda secundaria de la combinacion como otro destino; si
+    # se envia la fila completa, ese valor vacio puede borrar la etiqueta que
+    # acaba de escribirse. Se divide la fila y se omite la celda secundaria.
+    label_col = columns["ctr"]
+    if start_col < label_col:
+        queue_values_update(
+            worksheet,
+            (
+                f"{gspread.utils.rowcol_to_a1(total_row, start_col)}:"
+                f"{gspread.utils.rowcol_to_a1(total_row, label_col - 1)}"
+            ),
+            [total_row_values[:label_col - start_col]],
+            mutation_batch,
+        )
     queue_values_update(
         worksheet,
-        (
-            f"{gspread.utils.rowcol_to_a1(total_row, start_col)}:"
-            f"{gspread.utils.rowcol_to_a1(total_row, end_col)}"
-        ),
-        [total_row_values],
+        gspread.utils.rowcol_to_a1(total_row, label_col),
+        [[total_row_values[label_col - start_col]]],
         mutation_batch,
     )
+    metrics_start_col = max(label_col + 2, columns["cost"])
+    if metrics_start_col <= end_col:
+        queue_values_update(
+            worksheet,
+            (
+                f"{gspread.utils.rowcol_to_a1(total_row, metrics_start_col)}:"
+                f"{gspread.utils.rowcol_to_a1(total_row, end_col)}"
+            ),
+            [total_row_values[metrics_start_col - start_col:]],
+            mutation_batch,
+        )
     if apply_formats:
         apply_total_value_formats(
             worksheet,
@@ -5015,6 +5038,7 @@ def ensure_historical_total_row(worksheet, historical_block):
         campaign_count += 1
 
     total_row = data_start_row + campaign_count + 1
+    structure_changed = False
     if next_period_row and total_row >= next_period_row:
         rows_to_insert = total_row - next_period_row + 1
         worksheet.insert_rows(
@@ -5024,19 +5048,25 @@ def ensure_historical_total_row(worksheet, historical_block):
             inherit_from_before=True,
         )
         invalidate_worksheet_values_cache(worksheet)
+        structure_changed = True
 
-    total_label_cell = gspread.utils.rowcol_to_a1(
-        total_row,
-        columns["ctr"],
+    # No se escribe la etiqueta y se vuelve a leer inmediatamente. Sheets
+    # puede devolver durante unos instantes la version anterior y provocar un
+    # falso "no se encontro". El bloque local marca la fila que ya existe y
+    # la escritura definitiva del total se envia despues en el mismo batch.
+    source_values = (
+        get_worksheet_values(worksheet, refresh=True)
+        if structure_changed
+        else values
     )
-    worksheet.update(
-        range_name=total_label_cell,
-        values=[["Total coste campa\u00f1as:"]],
-        value_input_option="USER_ENTERED",
-    )
-    invalidate_worksheet_values_cache(worksheet)
-
-    refreshed_values = get_worksheet_values(worksheet, refresh=True)
+    refreshed_values = [list(row) for row in source_values]
+    while len(refreshed_values) < total_row:
+        refreshed_values.append([])
+    total_values = refreshed_values[total_row - 1]
+    while len(total_values) < columns["ctr"]:
+        total_values.append("")
+    total_values[columns["ctr"] - 1] = "Total coste campa\u00f1as:"
+    set_worksheet_values_cache(worksheet, refreshed_values)
     return build_block_from_header(
         refreshed_values,
         period_row,

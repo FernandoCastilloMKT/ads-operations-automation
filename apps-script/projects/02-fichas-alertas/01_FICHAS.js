@@ -19,7 +19,6 @@ const SEM_STATUS_COLUMN = 19; // Posicion predeterminada: columna S.
 const SEM_STATUS_ROW = 3;
 const SEM_SCHEDULES = [
   { handler: SEM_SCHEDULED_HANDLER, hour: 7, minute: 35 },
-  { handler: SEM_SCHEDULED_HANDLER, hour: 12, minute: 50 },
 ];
 const SEM_LEGACY_TRIGGER_HANDLERS = [
   'ejecutarTodasSemManana',
@@ -267,7 +266,7 @@ function FICHAS_98_instalarActivadores() {
   });
 
   Logger.log(
-    'Activadores SEM instalados: 07:35 y 12:50, zona Europe/Madrid.'
+    'Activador SEM instalado: 07:35, zona Europe/Madrid.'
   );
 }
 
@@ -290,7 +289,7 @@ function FICHAS_99_auditarActivadores() {
   }
 
   Logger.log(
-    'FICHAS: auditoria correcta; hay dos activadores diarios con un unico handler.'
+    'FICHAS: auditoria correcta; hay un activador diario a las 07:35.'
   );
 }
 
