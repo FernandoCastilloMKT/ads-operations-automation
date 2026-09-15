@@ -22,6 +22,18 @@ Do not include any of the following in issues, commits or pull requests:
 
 Use the fictitious `config_*.example.json` files when demonstrating changes.
 
+## Publication Controls
+
+The public tree is rebuilt from an explicit allowlist. Before publication, the
+audit rejects known private configuration values and high-confidence credential
+formats, including Google API keys and OAuth client IDs, Meta access tokens,
+GitHub tokens, JWTs and private keys. CI then runs against fictitious
+configuration without contacting external services.
+
+This scanning is a final guardrail, not a reason to copy private material into
+the build directory. Review the generated diff and repository visibility before
+every push.
+
 ## Reporting A Security Issue
 
 Do not open a public issue containing sensitive evidence. Contact the

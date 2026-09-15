@@ -10,6 +10,10 @@ Este repositorio es una demostracion publica y anonimizada de la arquitectura.
 No esta conectado a la infraestructura de produccion, no contiene credenciales
 y no puede acceder a cuentas publicitarias ni hojas reales.
 
+Todas las integraciones publicadas con plataformas publicitarias son de solo
+lectura. La modificacion de campanas, presupuestos, anuncios o cuentas queda
+deliberadamente fuera del alcance de esta demostracion.
+
 ## El Problema Que Resuelve
 
 La operativa SEM necesita actualizar diariamente dos tipos de controles:
@@ -122,7 +126,8 @@ AGENTS.md, pytest.ini       Entrada para IA y descubrimiento aislado de pruebas
 El paquete publico se genera con `scripts/build_public_repository.py` desde
 una lista cerrada. Despues, `scripts/audit_public_repository.py` rechaza
 identidades, correos, IDs de cuentas u hojas, credenciales, rutas locales de
-usuario y valores conocidos de la configuracion privada.
+usuario y valores conocidos de la configuracion privada. Tambien reconoce
+formatos de alta confianza de credenciales de Google, Meta, GitHub y tokens JWT.
 
 Consulta [los límites de fiabilidad](docs/RELIABILITY.md) y
 [la guía para agentes](AGENTS.md). Las renovaciones se guardan junto a su marca

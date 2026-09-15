@@ -24,6 +24,7 @@ TEXT_SUFFIXES = {
 }
 FORBIDDEN_NAMES = {
     ".env",
+    ".clasprc.json",
     ".clasp.json",
     ".webapp-deployment.json",
     "config_clientes.json",
@@ -59,8 +60,23 @@ STATIC_PATTERNS = {
         re.I,
     ),
     "ruta de usuario Windows": re.compile(r"(?i)\bC:\\Users\\[^\\\s]+"),
-    "token GitHub": re.compile(r"\b(?:github_pat_|gh[pousr]_[A-Za-z0-9_]+)"),
-    "clave privada": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    "token GitHub": re.compile(
+        r"\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b"
+    ),
+    "clave API de Google": re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b"),
+    "cliente OAuth de Google": re.compile(
+        r"\b\d{8,}-[a-z0-9_-]{16,}\.apps\.googleusercontent\.com\b",
+        re.I,
+    ),
+    "token de acceso Meta": re.compile(r"\bEA[A-Za-z0-9]{60,}\b"),
+    "token JWT": re.compile(
+        r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."
+        r"[A-Za-z0-9_-]{10,}\b"
+    ),
+    "clave privada": re.compile(
+        r"-----BEGIN [A-Z ]*"
+        r"PRIVATE KEY-----"
+    ),
     "ID publicitario de 10 digitos": re.compile(r"(?<!\d)(?!0{10})(\d{10})(?!\d)"),
     "ID de Sheet literal": re.compile(
         r"(?i)\b[A-Z_]*(?:SPREADSHEET|SHEET)_ID\s*=\s*['\"]"
@@ -87,7 +103,7 @@ def collect_private_needles(reference_paths):
     needles = set()
     for path in reference_paths:
         if not path.is_file():
-            continue
+            raise ValueError("Falta una referencia privada requerida para la auditoria.")
         data = json.loads(path.read_text(encoding="utf-8"))
         if path.name == "config_clientes.json":
             for client in data.get("clientes", []):
@@ -179,11 +195,21 @@ def iter_text_files(root):
 
 def audit(root, private_needles):
     findings = []
+    # Underscores delimit identifiers; letters inside ordinary words do not.
+    private_patterns = [
+        re.compile(r"(?<![^\W_])" + re.escape(needle) + r"(?![^\W_])", re.I)
+        for needle in private_needles
+    ]
     for path in root.rglob("*"):
         if not path.is_file() or ".git" in path.parts:
             continue
         relative_path = str(path.relative_to(root))
-        if path.name in FORBIDDEN_NAMES or "credentials" in path.parts:
+        if (
+            path.name in FORBIDDEN_NAMES
+            or (path.name.startswith(".env.") and path.name != ".env.example")
+            or "credentials" in path.parts
+            or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"}
+        ):
             findings.append((path, "archivo privado prohibido"))
         if any(pattern.search(relative_path) for pattern in PRIVATE_IDENTITY_PATTERNS):
             findings.append((path, "identidad interna en la ruta"))
@@ -194,14 +220,9 @@ def audit(root, private_needles):
         except UnicodeDecodeError:
             continue
         for label, pattern in STATIC_PATTERNS.items():
-            if (
-                path.name == "audit_public_repository.py"
-                and label in {"token GitHub", "clave privada"}
-            ):
-                continue
             if pattern.search(text):
                 findings.append((path, label))
-        if any(needle in text for needle in private_needles):
+        if any(pattern.search(text) for pattern in private_patterns):
             findings.append((path, "dato presente en configuracion privada"))
     return sorted(set(findings), key=lambda item: (str(item[0]), item[1]))
 
