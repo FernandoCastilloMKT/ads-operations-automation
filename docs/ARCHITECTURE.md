@@ -107,7 +107,7 @@ excluded, and a property-backed key prevents duplicate notifications.
 
 This repository is a source-visible technical showcase:
 
-- only CI is active;
+- only CI is active among repository-owned workflows; GitHub may also run its managed dependency graph check;
 - no GitHub Secrets are configured;
 - production Apps Script is not connected to it;
 - all configuration values are fictitious;

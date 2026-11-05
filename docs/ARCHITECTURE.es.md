@@ -107,7 +107,7 @@ en propiedades evita notificaciones duplicadas.
 
 Este repositorio es source-visible y demostrativo:
 
-- solo CI esta activo;
+- solo CI esta activo entre los workflows propios; GitHub puede ejecutar su comprobacion gestionada del grafo de dependencias;
 - no contiene GitHub Secrets;
 - no esta vinculado con Apps Script productivo;
 - usa configuraciones ficticias;
