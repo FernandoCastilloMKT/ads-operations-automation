@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
       - name: Preparar Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -47,4 +49,4 @@ jobs:
 
       - name: Auditar paquete publico
         if: ${{ hashFiles('.public-runner') != '' }}
-        run: python scripts/audit_public_repository.py --root .
+        run: python scripts/audit_public_repository.py --root . --history HEAD

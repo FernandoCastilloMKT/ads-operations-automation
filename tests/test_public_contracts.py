@@ -114,16 +114,8 @@ class PublicConfigurationTests(unittest.TestCase):
         "Contrato exclusivo del paquete publico.",
     )
     def test_internal_identity_is_absent(self):
-        identity = re.compile(r"example[\s_.-]*agency", re.I)
-        text_suffixes = {".gs", ".html", ".js", ".json", ".md", ".py"}
-        for path in ROOT.rglob("*"):
-            if not path.is_file() or ".git" in path.parts:
-                continue
-            self.assertIsNone(identity.search(str(path.relative_to(ROOT))))
-            if path.suffix.lower() not in text_suffixes:
-                continue
-            text = path.read_text(encoding="utf-8")
-            self.assertIsNone(identity.search(text), path)
+        from audit_public_repository import audit
+        self.assertEqual(audit(ROOT, set()), [])
 
     @unittest.skipUnless(
         (ROOT / ".public-runner").is_file(),

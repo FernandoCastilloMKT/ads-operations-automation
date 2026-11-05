@@ -532,3 +532,58 @@ def fetch_microsoft_campaign_periods(
         "exchange_rate_source": "ECB monthly average reference rates",
         "exchange_rates": exchange_rates,
     }
+
+
+def fetch_microsoft_contract_summary(account_id, customer_id, account_number,
+                                     start_day, end_day, target_day):
+    """Independent EUR contract table; never changes the USD/BCE integration."""
+    from openapi_client.models.customer.get_account_request import GetAccountRequest
+
+    if end_day < start_day:
+        raise ValueError('Microsoft contract dates are reversed')
+    if target_day < start_day:
+        return {'rows': [], 'not_started': True}
+    try:
+        retention_start = target_day.replace(year=target_day.year - 3)
+    except ValueError:
+        retention_start = target_day.replace(year=target_day.year - 3, day=28)
+    if start_day < retention_start:
+        if target_day > end_day:
+            return {'rows': [], 'preserve_closed': True}
+        raise ValueError('Microsoft contract exceeds the 36-month report retention; preserve existing totals')
+    _, authorization = create_authorization_data()
+    authorization.account_id = int(account_id)
+    authorization.customer_id = int(customer_id)
+    service = create_service_client('CustomerManagementService', authorization)
+    response = _run_with_retries(
+        lambda: service.GetAccount(GetAccountRequest(AccountId=str(account_id))),
+        'validando cuenta EUR del contrato',
+    )
+    account = get_field(response, 'Account', 'account')
+    currency = get_field(account, 'CurrencyCode', 'currency_code')
+    currency = getattr(currency, 'value', currency)
+    if (str(get_field(account, 'Id', 'id')) != str(account_id)
+            or str(get_field(account, 'Number', 'number')) != account_number
+            or str(get_field(account, 'ParentCustomerId', 'parent_customer_id')) != str(customer_id)
+            or currency != 'EUR'):
+        raise ValueError('Microsoft account identity or EUR currency does not match contract')
+    query_end = min(end_day, target_day)
+    catalog = _campaign_catalog(authorization, account_id, customer_id)
+    records = _download_daily_report(authorization, account_id, customer_id, start_day, query_end)
+    records = [row for row in records if start_day <= row['day'] <= query_end]
+    unit_rates = {(row['day'].year, row['day'].month): 1.0 for row in records}
+    unit_rates[(query_end.year, query_end.month)] = 1.0
+    rows = _build_rows(records, catalog, '', unit_rates, query_end)
+    reported = {row['campaign_id'].removeprefix('microsoft:') for row in rows}
+    # A successful empty report is zero, but active campaigns still belong in the table.
+    for campaign_id, campaign in catalog.items():
+        if campaign_id in reported or campaign['status'] != 'enabled':
+            continue
+        rows.append({
+            'campaign_id': f'microsoft:{campaign_id}', 'campaign_name': campaign['name'],
+            'campaign_status': campaign['status'], 'clicks': 0, 'impressions': 0,
+            'cost': 0, 'raw_cost': 0, 'average_cpc': 0, 'conversions': 0,
+        })
+    rows.sort(key=lambda row: (row['campaign_status'] != 'enabled', -row['raw_cost'], row['campaign_name']))
+    return {'rows': rows, 'currency': 'EUR', 'query_start_day': start_day,
+            'query_end_day': query_end, 'not_started': False}

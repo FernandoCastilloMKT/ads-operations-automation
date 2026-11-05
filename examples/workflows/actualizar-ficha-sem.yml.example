@@ -1,5 +1,5 @@
 name: Actualizar ficha SEM
-run-name: Fichas SEM | ${{ inputs.request_id || github.run_id }}
+run-name: Fichas SEM | ${{ inputs.cliente }} | ${{ inputs.request_id || github.run_id }}
 
 on:
   workflow_dispatch:
@@ -73,7 +73,7 @@ jobs:
 
       - name: Validar entorno Python
         run: |
-          PYTHONPATH=scripts .venv/bin/python -c "import bingads, google.ads.googleads, google.auth, gspread, dotenv, tzdata; import microsoft_ads.provider"
+          PYTHONPATH=scripts .venv/bin/python -c "import bingads, google.ads.googleads, google.auth, gspread, dotenv, tzdata; import microsoft_ads.provider, openai_ads.provider"
 
       - name: Preparar configuraciones privadas
         env:
@@ -100,6 +100,7 @@ jobs:
           MICROSOFT_ADS_GOOGLE_CLIENT_ID: ${{ secrets.MICROSOFT_ADS_GOOGLE_CLIENT_ID }}
           MICROSOFT_ADS_GOOGLE_CLIENT_SECRET: ${{ secrets.MICROSOFT_ADS_GOOGLE_CLIENT_SECRET }}
           MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN: ${{ secrets.MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN }}
+          OPENAI_ADS_API_KEY: ${{ secrets.OPENAI_ADS_API_KEY }}
         run: |
           missing=0
           for name in \
@@ -111,7 +112,8 @@ jobs:
             MICROSOFT_ADS_DEVELOPER_TOKEN \
             MICROSOFT_ADS_GOOGLE_CLIENT_ID \
             MICROSOFT_ADS_GOOGLE_CLIENT_SECRET \
-            MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN
+            MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN \
+            OPENAI_ADS_API_KEY
           do
             if [ -z "${!name}" ]; then
               echo "::error title=Falta secret::${name}"
@@ -129,6 +131,14 @@ jobs:
 
       - name: Actualizar ficha SEM
         env:
+          META_ADS_APP_ID: ${{ secrets.META_ADS_APP_ID }}
+          META_ADS_APP_SECRET: ${{ secrets.META_ADS_APP_SECRET }}
+          META_ADS_ACCESS_TOKEN: ${{ secrets.META_ADS_ACCESS_TOKEN }}
+          META_ADS_API_VERSION: ${{ secrets.META_ADS_API_VERSION }}
+          LINKEDIN_ADS_CLIENT_ID: ${{ secrets.LINKEDIN_ADS_CLIENT_ID }}
+          LINKEDIN_ADS_CLIENT_SECRET: ${{ secrets.LINKEDIN_ADS_CLIENT_SECRET }}
+          LINKEDIN_ADS_ACCESS_TOKEN: ${{ secrets.LINKEDIN_ADS_ACCESS_TOKEN }}
+          LINKEDIN_ADS_REFRESH_TOKEN: ${{ secrets.LINKEDIN_ADS_REFRESH_TOKEN }}
           GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
           GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
           GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
@@ -137,6 +147,7 @@ jobs:
           MICROSOFT_ADS_GOOGLE_CLIENT_ID: ${{ secrets.MICROSOFT_ADS_GOOGLE_CLIENT_ID }}
           MICROSOFT_ADS_GOOGLE_CLIENT_SECRET: ${{ secrets.MICROSOFT_ADS_GOOGLE_CLIENT_SECRET }}
           MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN: ${{ secrets.MICROSOFT_ADS_GOOGLE_REFRESH_TOKEN }}
+          OPENAI_ADS_API_KEY: ${{ secrets.OPENAI_ADS_API_KEY }}
           CLIENTE_INPUT: ${{ inputs.cliente }}
         run: |
           .venv/bin/python scripts/public_entrypoint.py --label fichas-sem -- \

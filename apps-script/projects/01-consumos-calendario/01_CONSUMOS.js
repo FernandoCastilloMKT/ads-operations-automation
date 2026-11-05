@@ -78,7 +78,7 @@ function CONSUMOS_03_botonManualEditado(event) {
     !event ||
     !event.range ||
     String(event.value || '').toUpperCase() !== 'TRUE' ||
-    !consumosEsMarcadorControl_(event.range.getNote())
+    !consumosEsControlManual_(event.range)
   ) {
     return;
   }
@@ -329,10 +329,8 @@ function consumosFinalizarPendiente_(
     toastTitle = 'Error al actualizar consumos';
   }
 
-  // El estado persistente es la fuente de verdad. La notificacion visual no
-  // esta disponible desde todos los contextos de Apps Script (por ejemplo,
-  // Execution API o algunos activadores), por lo que el bloqueo se elimina
-  // antes de intentar mostrarla.
+  // Release the request before the optional toast, which is unavailable
+  // from some Apps Script contexts.
   properties.deleteProperty(pendingKey);
   consumosToastSeguro_(spreadsheet, toastMessage, toastTitle, 10);
 }
@@ -735,7 +733,40 @@ function consumosEsMarcadorControl_(note) {
     );
 }
 
+function consumosControlMinimo_(sheet) {
+  const layouts = JSON.parse(RuntimeConfig.optional(
+    'CONSUMOS_MINIMAL_CONTROLS_JSON', '{}'
+  ));
+  if (!layouts || Array.isArray(layouts) || typeof layouts !== 'object') {
+    throw new Error('Configuracion de controles minimos incorrecta.');
+  }
+  const layout = layouts[sheet.getParent().getId()];
+  if (!layout || layout.sheetName !== sheet.getName()) {
+    return null;
+  }
+  if (!/^[A-Z]{1,3}[1-9]\d*$/.test(String(layout.buttonCell || ''))) {
+    throw new Error('Celda del control minimo incorrecta.');
+  }
+  return layout;
+}
+
+function consumosEsControlManual_(range) {
+  const layout = consumosControlMinimo_(range.getSheet());
+  if (!layout) {
+    return consumosEsMarcadorControl_(range.getNote());
+  }
+  if (range.getA1Notation() !== layout.buttonCell) {
+    return false;
+  }
+  const validation = range.getDataValidation();
+  return Boolean(validation && validation.getCriteriaType() ===
+    SpreadsheetApp.DataValidationCriteria.CHECKBOX);
+}
+
 function consumosCeldaEstadoControl_(checkbox) {
+  if (consumosControlMinimo_(checkbox.getSheet())) {
+    return null;
+  }
   const note = String(checkbox.getNote() || '');
   const marker =
     `${CONSUMOS_MANUAL_BUTTON_MARKER}${CONSUMOS_MANUAL_STATUS_SEPARATOR}`;
@@ -752,6 +783,11 @@ function consumosCeldaEstadoControl_(checkbox) {
 }
 
 function consumosLocalizarControl_(sheet, year) {
+  const layout = consumosControlMinimo_(sheet);
+  if (layout) {
+    const checkbox = sheet.getRange(layout.buttonCell);
+    return consumosEsControlManual_(checkbox) ? checkbox : null;
+  }
   const lastColumn = sheet.getLastColumn();
   const lastRow = Math.min(Math.max(sheet.getLastRow(), 1), 20);
   if (lastColumn < 1) {
@@ -813,6 +849,9 @@ function consumosActualizarEstadoControl_(
     return;
   }
   const status = consumosCeldaEstadoControl_(checkbox);
+  if (!status) {
+    return;
+  }
   status
     .setValue(message)
     .setNote(runUrl ? `Ejecucion: ${runUrl}` : '')

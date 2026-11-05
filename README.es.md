@@ -47,6 +47,10 @@ Google Sheets con reglas de negocio propias. Con ello se obtiene:
 - conserva historicos y evita duplicados mediante el ID de cuenta;
 - escribe matrices completas en Google Sheets, no celda por celda.
 
+Las hojas terminan en el ultimo dia real de cada mes, incluidos los anos
+bisiestos, y los totales abarcan todos los dias validos. Si una cuenta sale
+del MCC o no puede leerse, se conserva su gasto: falta de acceso no es cero.
+
 ### Fichas SEM
 
 `scripts/actualizar_fichas_sem.py`:
@@ -63,6 +67,10 @@ Google Sheets con reglas de negocio propias. Con ello se obtiene:
 - admite varias cuentas publicitarias agregadas en una misma ficha;
 - aplica reglas especiales mediante configuracion, sin incrustar clientes en
   el codigo publico.
+
+Las alturas y anchuras existentes quedan bajo control del operador. El bloque
+de saldo refresca el periodo actual y el inmediatamente anterior, sin
+recalcular silenciosamente todos los meses antiguos.
 
 ### Verificacion de acciones SEM
 

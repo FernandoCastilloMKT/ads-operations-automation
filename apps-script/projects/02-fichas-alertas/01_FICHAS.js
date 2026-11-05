@@ -795,6 +795,7 @@ function fichasValidarDisenoCompacto_(sheet, layout) {
   }
 
   const formatRange = sheet.getRange(layout.formatRange);
+  fichasCombinacionesEstado_(sheet, layout);
   const displayValues = formatRange.getDisplayValues();
   const formulas = formatRange.getFormulas();
   for (let row = 0; row < formatRange.getNumRows(); row += 1) {
@@ -821,6 +822,33 @@ function fichasValidarDisenoCompacto_(sheet, layout) {
   }
 }
 
+function fichasCombinacionesEstado_(sheet, layout) {
+  if (!layout.statusMergeRange) {
+    return [];
+  }
+  const statusMerge = sheet.getRange(layout.statusMergeRange);
+  const mergedRanges = statusMerge.getMergedRanges();
+  mergedRanges.forEach((merged) => {
+    if (
+      merged.getRow() !== layout.statusRow ||
+      merged.getColumn() !== layout.statusColumn ||
+      merged.getNumRows() !== 1
+    ) {
+      throw new Error(`${sheet.getName()}: combinacion de estado inesperada.`);
+    }
+    const values = merged.getDisplayValues()[0];
+    const formulas = merged.getFormulas()[0];
+    if (
+      formulas.some((value) => value) ||
+      values.slice(1).some((value) => value) ||
+      (values[0] && !fichasEsEstadoGestionado_(values[0]))
+    ) {
+      throw new Error(`${sheet.getName()}: el estado combinado contiene datos.`);
+    }
+  });
+  return mergedRanges;
+}
+
 function fichasAplicarDisenoCompacto_(sheet, layout) {
   if (!layout.compact || !layout.formatRange) {
     return;
@@ -828,34 +856,53 @@ function fichasAplicarDisenoCompacto_(sheet, layout) {
   fichasValidarDisenoCompacto_(sheet, layout);
 
   const formatRange = sheet.getRange(layout.formatRange);
-
+  let templateSheet = null;
+  let templateRange = null;
   if (layout.templateSheet) {
-    const templateSheet = sheet.getParent().getSheetByName(layout.templateSheet);
+    templateSheet = sheet.getParent().getSheetByName(layout.templateSheet);
     if (!templateSheet) {
       throw new Error(
         `${sheet.getName()}: no existe la plantilla ${layout.templateSheet}.`
       );
     }
-    const templateRange = templateSheet.getRange(layout.formatRange);
+    templateRange = templateSheet.getRange(layout.formatRange);
     if (
       templateRange.getNumRows() !== formatRange.getNumRows() ||
       templateRange.getNumColumns() !== formatRange.getNumColumns()
     ) {
       throw new Error(`${sheet.getName()}: el rango de formato no coincide.`);
     }
-    if (templateSheet.getSheetId() !== sheet.getSheetId()) {
-      templateRange.copyTo(
-        formatRange,
-        SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
-        false
-      );
+  }
+
+  // Reducir una combinacion exige descombinar primero su rango completo.
+  const targetStatus = layout.statusMergeRange
+    ? sheet.getRange(layout.statusMergeRange) : null;
+  fichasCombinacionesEstado_(sheet, layout).forEach((merged) => {
+    const firstOutside = targetStatus.getColumn() + targetStatus.getNumColumns();
+    const oldEnd = merged.getColumn() + merged.getNumColumns();
+    merged.breakApart();
+    if (oldEnd > firstOutside) {
+      sheet.getRange(layout.statusRow, firstOutside, 1, oldEnd - firstOutside)
+        .setBorder(false, false, false, false, false, false);
     }
+  });
+
+  if (templateSheet && templateSheet.getSheetId() !== sheet.getSheetId()) {
+    templateRange.copyTo(
+      formatRange,
+      SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+      false
+    );
   }
 
   if (layout.statusMergeRange) {
     const statusMerge = sheet.getRange(layout.statusMergeRange);
     statusMerge.breakApart();
     statusMerge.merge();
+    statusMerge.setBorder(
+      true, true, true, true, false, false,
+      '#000000', SpreadsheetApp.BorderStyle.SOLID
+    );
   }
 }
 
@@ -966,9 +1013,6 @@ function fichasRepararBotonEnHoja_(sheet, label) {
         '#1557b0',
         SpreadsheetApp.BorderStyle.SOLID_MEDIUM
       );
-    sheet.setColumnWidth(layout.buttonColumn, 32);
-    sheet.setColumnWidth(layout.buttonColumn + 1, 150);
-    sheet.setRowHeight(layout.buttonRow, 28);
   }
 
   const status = sheet.getRange(layout.statusRow, layout.statusColumn);

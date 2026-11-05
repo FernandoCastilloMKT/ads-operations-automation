@@ -220,6 +220,19 @@ function SALDOS_99_auditarActivador() {
   );
 }
 
+/** Read-only scope/recipient audit; never sends mail or resets anti-spam. */
+function SALDOS_94_auditarAlcanceSinEnviar() {
+  const result = semSaldoCollectAlerts_();
+  return {
+    rowsRead: result.rowsRead,
+    activeAlerts: result.alerts.length,
+    excludedRows: result.excludedRows,
+    excludedSections: result.excludedSections,
+    saldoRecipients: RuntimeConfig.list('SEM_SALDO_RECIPIENTS'),
+    endDateRecipients: RuntimeConfig.list('SEM_END_DATE_RECIPIENTS'),
+  };
+}
+
 function semSaldoCollectAlerts_() {
   const spreadsheet = SpreadsheetApp.openById(RuntimeConfig.required('CONTROL_SEM_SPREADSHEET_ID'));
   const worksheet = spreadsheet.getSheetByName(RuntimeConfig.required('SEM_GLOBAL_SHEET'));
@@ -240,6 +253,7 @@ function semSaldoCollectAlerts_() {
   const alertsByAccount = {};
   let excludedSection = '';
   let excludedRows = 0;
+  const excludedSections = {};
 
   for (let rowIndex = header.rowIndex + 1; rowIndex < values.length; rowIndex += 1) {
     const row = values[rowIndex];
@@ -248,12 +262,13 @@ function semSaldoCollectAlerts_() {
     const displayedId = semSaldoCellText_(displayRow, header.columns.idCuenta);
     const accountKey = displayedId.replace(/\D/g, '');
 
-    if (semSaldoIsSectionMarker_(client, displayedId, accountKey)) {
-      const sectionName = semSaldoNormalizeHeader_(displayedId);
+    const sectionName = semSaldoSectionName_(displayRow, header.columns);
+    if (sectionName) {
       excludedSection = SEM_SALDO_EXCLUDED_SECTIONS.includes(sectionName)
         ? sectionName
         : '';
       if (excludedSection) {
+        excludedSections[excludedSection] = excludedSections[excludedSection] || 0;
         Logger.log(
           `Alertas saldo SEM: se excluye el bloque ${displayedId} desde la ` +
             `fila ${rowIndex + 1}.`
@@ -264,6 +279,7 @@ function semSaldoCollectAlerts_() {
 
     if (excludedSection) {
       excludedRows += 1;
+      excludedSections[excludedSection] += 1;
       continue;
     }
 
@@ -340,7 +356,24 @@ function semSaldoCollectAlerts_() {
     alerts: alerts,
     rowsRead: Math.max(0, values.length - header.rowIndex - 1),
     checkedAt: new Date(),
+    excludedRows: excludedRows,
+    excludedSections: excludedSections,
   };
+}
+
+function semSaldoSectionName_(displayRow, columns) {
+  const client = semSaldoCellText_(displayRow, columns.cliente);
+  const displayedId = semSaldoCellText_(displayRow, columns.idCuenta);
+  const accountKey = displayedId.replace(/\D/g, '');
+  if (client || /^\d{10}$/.test(accountKey)) {
+    return '';
+  }
+  // Section labels can be anchored in A when their merged range starts there.
+  const known = displayRow.slice(0, columns.cliente + 1)
+    .map(semSaldoNormalizeHeader_)
+    .find((value) => SEM_SALDO_EXCLUDED_SECTIONS.includes(value));
+  return known || (semSaldoIsSectionMarker_(client, displayedId, accountKey)
+    ? semSaldoNormalizeHeader_(displayedId) : '');
 }
 
 function semSaldoIsSectionMarker_(client, displayedId, accountKey) {

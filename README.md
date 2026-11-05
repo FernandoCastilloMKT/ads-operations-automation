@@ -46,6 +46,10 @@ custom business rules. This provides:
 - preserves historical data and prevents duplicates using the account ID;
 - writes complete matrices to Google Sheets instead of updating cell by cell.
 
+Monthly layouts stop at the actual last day (including leap years), and totals
+span every valid day. When an account disappears from a manager or cannot be
+read, recorded spending is preserved; missing access is not interpreted as zero.
+
 ### SEM client workbooks
 
 `scripts/actualizar_fichas_sem.py`:
@@ -62,6 +66,10 @@ custom business rules. This provides:
 - supports multiple advertising accounts aggregated into one client workbook;
 - applies exceptional rules through configuration rather than embedding
   client names in public source code.
+
+Existing row heights and column widths remain operator-controlled. The balance
+block refreshes the current and immediately preceding period, rather than
+silently recalculating every older month.
 
 ### SEM action verification
 
